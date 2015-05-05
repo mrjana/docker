@@ -5,7 +5,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/docker/docker/daemon/networkdriver/bridge"
 	"github.com/docker/docker/nat"
 	"github.com/docker/docker/pkg/iptables"
 )
@@ -161,5 +160,6 @@ func (l *Link) Disable() {
 }
 
 func (l *Link) toggle(action string, ignoreErrors bool) error {
-	return bridge.LinkContainers(action, l.ParentIP, l.ChildIP, l.Ports, ignoreErrors)
+	return nil
+	// return bridge.LinkContainers(action, l.ParentIP, l.ChildIP, l.Ports, ignoreErrors)
 }

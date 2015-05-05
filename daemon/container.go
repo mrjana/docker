@@ -613,30 +613,30 @@ func (container *Container) buildHostnameAndHostsFiles(IP string) error {
 
 func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, error) {
 	var (
-		options   []libnetwork.EndpointOption
-		err       error
-		dns       []string
-		dnsSearch []string
+		joinOptions []libnetwork.EndpointOption
+		err         error
+		dns         []string
+		dnsSearch   []string
 	)
 
-	options = append(options, libnetwork.JoinOptionHostname(container.Config.Hostname))
-	options = append(options, libnetwork.JoinOptionDomainname(container.Config.Domainname))
+	joinOptions = append(joinOptions, libnetwork.JoinOptionHostname(container.Config.Hostname))
+	joinOptions = append(joinOptions, libnetwork.JoinOptionDomainname(container.Config.Domainname))
 
 	if container.hostConfig.NetworkMode.IsHost() {
-		options = append(options, libnetwork.JoinOptionUseDefaultSandbox())
+		joinOptions = append(joinOptions, libnetwork.JoinOptionUseDefaultSandbox())
 	}
 
 	container.HostsPath, err = container.GetRootResourcePath("hosts")
 	if err != nil {
 		return nil, err
 	}
-	options = append(options, libnetwork.JoinOptionHostsPath(container.HostsPath))
+	joinOptions = append(joinOptions, libnetwork.JoinOptionHostsPath(container.HostsPath))
 
 	container.ResolvConfPath, err = container.GetRootResourcePath("resolv.conf")
 	if err != nil {
 		return nil, err
 	}
-	options = append(options, libnetwork.JoinOptionResolvConfPath(container.ResolvConfPath))
+	joinOptions = append(joinOptions, libnetwork.JoinOptionResolvConfPath(container.ResolvConfPath))
 
 	if len(container.hostConfig.Dns) > 0 {
 		dns = container.hostConfig.Dns
@@ -645,7 +645,7 @@ func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, err
 	}
 
 	for _, d := range dns {
-		options = append(options, libnetwork.JoinOptionDNS(d))
+		joinOptions = append(joinOptions, libnetwork.JoinOptionDNS(d))
 	}
 
 	if len(container.hostConfig.DnsSearch) > 0 {
@@ -655,7 +655,7 @@ func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, err
 	}
 
 	for _, ds := range dnsSearch {
-		options = append(options, libnetwork.JoinOptionDNSSearch(ds))
+		joinOptions = append(joinOptions, libnetwork.JoinOptionDNSSearch(ds))
 	}
 
 	if container.NetworkSettings.SecondaryIPAddresses != nil {
@@ -665,9 +665,11 @@ func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, err
 		}
 
 		for _, a := range container.NetworkSettings.SecondaryIPAddresses {
-			options = append(options, libnetwork.JoinOptionExtraHost(name, a.Addr))
+			joinOptions = append(joinOptions, libnetwork.JoinOptionExtraHost(name, a.Addr))
 		}
 	}
+
+	var childEndpoints, parentEndpoints []string
 
 	children, err := container.daemon.Children(container.Name)
 	if err != nil {
@@ -682,13 +684,14 @@ func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, err
 		if alias != child.Name[1:] {
 			aliasList = aliasList + " " + child.Name[1:]
 		}
-		options = append(options, libnetwork.JoinOptionExtraHost(aliasList, child.NetworkSettings.IPAddress))
+		joinOptions = append(joinOptions, libnetwork.JoinOptionExtraHost(aliasList, child.NetworkSettings.IPAddress))
+		childEndpoints = append(childEndpoints, child.NetworkSettings.EndpointID)
 	}
 
 	for _, extraHost := range container.hostConfig.ExtraHosts {
 		// allow IPv6 addresses in extra hosts; only split on first ":"
 		parts := strings.SplitN(extraHost, ":", 2)
-		options = append(options, libnetwork.JoinOptionExtraHost(parts[0], parts[1]))
+		joinOptions = append(joinOptions, libnetwork.JoinOptionExtraHost(parts[0], parts[1]))
 	}
 
 	refs := container.daemon.ContainerGraph().RefPaths(container.ID)
@@ -704,11 +707,21 @@ func (container *Container) buildJoinOptions() ([]libnetwork.EndpointOption, err
 
 		if c != nil && !container.daemon.config.DisableNetwork && container.hostConfig.NetworkMode.IsPrivate() {
 			logrus.Debugf("Update /etc/hosts of %s for alias %s with ip %s", c.ID, ref.Name, container.NetworkSettings.IPAddress)
-			options = append(options, libnetwork.JoinOptionParentUpdate(c.NetworkSettings.EndpointID, ref.Name, container.NetworkSettings.IPAddress))
+			joinOptions = append(joinOptions, libnetwork.JoinOptionParentUpdate(c.NetworkSettings.EndpointID, ref.Name, container.NetworkSettings.IPAddress))
+			parentEndpoints = append(parentEndpoints, c.NetworkSettings.EndpointID)
 		}
 	}
 
-	return options, nil
+	linkOptions := options.Generic{
+		options.GenericData: options.Generic{
+			"ParentEndpoints": parentEndpoints,
+			"ChildEndpoints":  childEndpoints,
+		},
+	}
+
+	joinOptions = append(joinOptions, libnetwork.JoinOptionGeneric(linkOptions))
+
+	return joinOptions, nil
 }
 
 func (container *Container) AllocateNetwork() error {

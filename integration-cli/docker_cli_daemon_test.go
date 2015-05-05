@@ -686,8 +686,8 @@ func (s *DockerDaemonSuite) TestDaemonICCLinkExpose(c *check.C) {
 	c.Assert(matched, check.Equals, true,
 		check.Commentf("iptables output should have contained %q, but was %q", regex, out))
 
-	_, err = d.Cmd("run", "-d", "--expose", "4567", "--name", "icc1", "busybox", "nc", "-l", "-p", "4567")
-	c.Assert(err, check.IsNil)
+	out, err = d.Cmd("run", "-d", "--expose", "4567", "--name", "icc1", "busybox", "nc", "-l", "-p", "4567")
+	c.Assert(err, check.IsNil, check.Commentf(out))
 
 	out, err = d.Cmd("run", "--link", "icc1:icc1", "busybox", "nc", "icc1", "4567")
 	c.Assert(err, check.IsNil, check.Commentf(out))
