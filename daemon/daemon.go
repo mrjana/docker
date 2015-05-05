@@ -1015,6 +1015,11 @@ func initNetworkController(config *Config) (libnetwork.NetworkController, error)
 		option["FixedCIDRv6"] = fCIDRv6
 	}
 
+	// --ip processing
+	if config.Bridge.DefaultIp != nil {
+		option["DefaultBindingIP"] = config.Bridge.DefaultIp
+	}
+
 	err = controller.ConfigureNetworkDriver("bridge", options.Generic{options.GenericData: option})
 	if err != nil {
 		return nil, fmt.Errorf("Error initializing bridge driver: %v", err)
