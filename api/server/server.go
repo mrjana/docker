@@ -23,7 +23,6 @@ import (
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/cliconfig"
 	"github.com/docker/docker/daemon"
-	"github.com/docker/docker/daemon/networkdriver/bridge"
 	"github.com/docker/docker/graph"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/parsers"
@@ -35,6 +34,7 @@ import (
 	"github.com/docker/docker/pkg/version"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
+	"github.com/docker/libnetwork/pkg/portallocator"
 )
 
 type ServerConfig struct {
@@ -1667,8 +1667,9 @@ func allocateDaemonPort(addr string) error {
 		return fmt.Errorf("failed to lookup %s address in host specification", host)
 	}
 
+	pa := portallocator.New()
 	for _, hostIP := range hostIPs {
-		if _, err := bridge.RequestPort(hostIP, "tcp", intPort); err != nil {
+		if _, err := pa.RequestPort(hostIP, "tcp", intPort); err != nil {
 			return fmt.Errorf("failed to allocate daemon listening port %d (err: %v)", intPort, err)
 		}
 	}
