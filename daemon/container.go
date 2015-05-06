@@ -769,11 +769,14 @@ func (container *Container) AllocateNetwork() error {
 	}
 
 	var pbList []netutils.PortBinding
+	var exposeList []netutils.TransportPort
 	for port := range portSpecs {
-		pb := netutils.PortBinding{}
-		pb.Proto = netutils.ParseProtocol(port.Proto())
-		pb.Port = uint16(port.Int())
+		expose := netutils.TransportPort{}
+		expose.Proto = netutils.ParseProtocol(port.Proto())
+		expose.Port = uint16(port.Int())
+		exposeList = append(exposeList, expose)
 
+		pb := netutils.PortBinding{Port: expose.Port, Proto: expose.Proto}
 		binding := bindings[port]
 		for i := 0; i < len(binding); i++ {
 			pbCopy := pb.GetCopy()
@@ -789,7 +792,9 @@ func (container *Container) AllocateNetwork() error {
 
 	var createOptions []libnetwork.EndpointOption
 
-	createOptions = append(createOptions, libnetwork.CreateOptionPortMapping(pbList))
+	createOptions = append(createOptions,
+		libnetwork.CreateOptionPortMapping(pbList),
+		libnetwork.CreateOptionExposedPorts(exposeList))
 
 	if container.Config.MacAddress != "" {
 		mac, err := net.ParseMAC(container.Config.MacAddress)
