@@ -643,7 +643,7 @@ func (container *Container) buildEndpointInfo(ep libnetwork.Endpoint, networkSet
 	networkSettings.IPAddress = iface.Address().IP.String()
 	networkSettings.IPPrefixLen = ones
 
-	if iface.AddressIPv6().IP.To16() != nil {
+	if iface.AddressIPv6() != nil && iface.AddressIPv6().IP.To16() != nil {
 		onesv6, _ := iface.AddressIPv6().Mask.Size()
 		networkSettings.GlobalIPv6Address = iface.AddressIPv6().IP.String()
 		networkSettings.GlobalIPv6PrefixLen = onesv6
