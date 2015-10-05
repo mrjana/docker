@@ -28,7 +28,7 @@ type Sandbox interface {
 	// Labels returns the sandbox's labels
 	Labels() map[string]interface{}
 	// Statistics retrieves the interfaces' statistics for the sandbox
-	Statistics() (map[string]*osl.InterfaceStatistics, error)
+	Statistics() (map[string]*types.InterfaceStatistics, error)
 	// Refresh leaves all the endpoints, resets and re-apply the options,
 	// re-joins all the endpoints without destroying the osl sandbox
 	Refresh(options ...SandboxOption) error
@@ -126,8 +126,8 @@ func (sb *sandbox) Labels() map[string]interface{} {
 	return sb.config.generic
 }
 
-func (sb *sandbox) Statistics() (map[string]*osl.InterfaceStatistics, error) {
-	m := make(map[string]*osl.InterfaceStatistics)
+func (sb *sandbox) Statistics() (map[string]*types.InterfaceStatistics, error) {
+	m := make(map[string]*types.InterfaceStatistics)
 
 	if sb.osSbox == nil {
 		return m, nil
@@ -247,6 +247,19 @@ func (sb *sandbox) getConnectedEndpoints() []*endpoint {
 	return eps
 }
 
+func (sb *sandbox) getEndpoint(id string) *endpoint {
+	sb.Lock()
+	defer sb.Unlock()
+
+	for _, ep := range sb.endpoints {
+		if ep.id == id {
+			return ep
+		}
+	}
+
+	return nil
+}
+
 func (sb *sandbox) updateGateway(ep *endpoint) error {
 	sb.Lock()
 	osSbox := sb.osSbox
@@ -324,12 +337,12 @@ func (sb *sandbox) populateNetworkResources(ep *endpoint) error {
 	i := ep.iface
 	ep.Unlock()
 
-	if i != nil {
+	if i.srcName != "" {
 		var ifaceOptions []osl.IfaceOption
 
-		ifaceOptions = append(ifaceOptions, sb.osSbox.InterfaceOptions().Address(&i.addr), sb.osSbox.InterfaceOptions().Routes(i.routes))
-		if i.addrv6.IP.To16() != nil {
-			ifaceOptions = append(ifaceOptions, sb.osSbox.InterfaceOptions().AddressIPv6(&i.addrv6))
+		ifaceOptions = append(ifaceOptions, sb.osSbox.InterfaceOptions().Address(i.addr), sb.osSbox.InterfaceOptions().Routes(i.routes))
+		if i.addrv6 != nil && i.addrv6.IP.To16() != nil {
+			ifaceOptions = append(ifaceOptions, sb.osSbox.InterfaceOptions().AddressIPv6(i.addrv6))
 		}
 
 		if err := sb.osSbox.AddInterface(i.srcName, i.dstPrefix, ifaceOptions...); err != nil {
@@ -359,7 +372,13 @@ func (sb *sandbox) populateNetworkResources(ep *endpoint) error {
 	return nil
 }
 
-func (sb *sandbox) clearNetworkResources(ep *endpoint) error {
+func (sb *sandbox) clearNetworkResources(origEp *endpoint) error {
+	ep := sb.getEndpoint(origEp.id)
+	if ep == nil {
+		return fmt.Errorf("could not find the sandbox endpoint data for endpoint %s",
+			ep.name)
+	}
+
 	sb.Lock()
 	osSbox := sb.osSbox
 	sb.Unlock()
@@ -837,7 +856,7 @@ func (eh epHeap) Less(i, j int) bool {
 		cjp = 0
 	}
 	if cip == cjp {
-		return eh[i].getNetwork().Name() < eh[j].getNetwork().Name()
+		return eh[i].network.Name() < eh[j].network.Name()
 	}
 
 	return cip > cjp

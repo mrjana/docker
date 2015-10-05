@@ -57,12 +57,16 @@ func NewHandle(app string, ds datastore.DataStore, id string, numElements uint32
 		return h, nil
 	}
 
-	// Register for status changes
-	h.watchForChanges()
-
 	// Get the initial status from the ds if present.
 	if err := h.store.GetObject(datastore.Key(h.Key()...), h); err != nil && err != datastore.ErrKeyNotFound {
 		return nil, err
+	}
+
+	// If the handle is not in store, write it.
+	if !h.Exists() {
+		if err := h.writeToStore(); err != nil {
+			return nil, fmt.Errorf("failed to write bitsequence to store: %v", err)
+		}
 	}
 
 	return h, nil
@@ -245,6 +249,12 @@ func (h *Handle) set(ordinal, start, end uint32, any bool, release bool) (uint32
 	)
 
 	for {
+		if h.store != nil {
+			if err := h.store.GetObject(datastore.Key(h.Key()...), h); err != nil && err != datastore.ErrKeyNotFound {
+				return ret, err
+			}
+		}
+
 		h.Lock()
 		// Get position if available
 		if release {
@@ -306,8 +316,23 @@ func (h *Handle) validateOrdinal(ordinal uint32) error {
 }
 
 // Destroy removes from the datastore the data belonging to this handle
-func (h *Handle) Destroy() {
-	h.deleteFromStore()
+func (h *Handle) Destroy() error {
+	for {
+		if err := h.deleteFromStore(); err != nil {
+			if _, ok := err.(types.RetryError); !ok {
+				return fmt.Errorf("internal failure while destroying the sequence: %v", err)
+			}
+			// Fetch latest
+			if err := h.store.GetObject(datastore.Key(h.Key()...), h); err != nil {
+				if err == datastore.ErrKeyNotFound { // already removed
+					return nil
+				}
+				return fmt.Errorf("failed to fetch from store when destroying the sequence: %v", err)
+			}
+			continue
+		}
+		return nil
+	}
 }
 
 // ToByteArray converts this handle's data into a byte array
