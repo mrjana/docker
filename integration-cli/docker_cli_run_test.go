@@ -18,7 +18,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker/pkg/integration/checker"
 	"github.com/docker/docker/pkg/nat"
+	"github.com/docker/docker/runconfig"
 	"github.com/docker/libnetwork/resolvconf"
 	"github.com/go-check/check"
 )
@@ -2229,6 +2231,23 @@ func (s *DockerSuite) TestRunModeIpcContainerNotRunning(c *check.C) {
 	}
 }
 
+func (s *DockerSuite) TestRunMountShmMqueueFromHost(c *check.C) {
+	// Not applicable on Windows as uses Unix-specific capabilities
+	testRequires(c, SameHostDaemon, DaemonIsLinux)
+
+	dockerCmd(c, "run", "-d", "--name", "shmfromhost", "-v", "/dev/shm:/dev/shm", "busybox", "sh", "-c", "echo -n test > /dev/shm/test && top")
+	volPath, err := inspectMountSourceField("shmfromhost", "/dev/shm")
+	c.Assert(err, check.IsNil)
+	if volPath != "/dev/shm" {
+		c.Fatalf("volumePath should have been /dev/shm, was %s", volPath)
+	}
+
+	out, _ := dockerCmd(c, "run", "--name", "ipchost", "--ipc", "host", "busybox", "cat", "/dev/shm/test")
+	if out != "test" {
+		c.Fatalf("Output of /dev/shm/test expected test but found: %s", out)
+	}
+}
+
 func (s *DockerSuite) TestContainerNetworkMode(c *check.C) {
 	// Not applicable on Windows as uses Unix-specific capabilities
 	testRequires(c, SameHostDaemon, DaemonIsLinux)
@@ -3151,7 +3170,7 @@ func (s *DockerSuite) TestRunCreateContainerFailedCleanUp(c *check.C) {
 	testRequires(c, DaemonIsLinux)
 	name := "unique_name"
 	_, _, err := dockerCmdWithError("run", "--name", name, "--link", "nothing:nothing", "busybox")
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("Expected docker run to fail!"))
+	c.Assert(err, check.NotNil, check.Commentf("Expected docker run to fail!"))
 
 	containerID, err := inspectField(name, "Id")
 	c.Assert(containerID, check.Equals, "", check.Commentf("Expected not to have this container: %s!", containerID))
@@ -3387,6 +3406,193 @@ func (s *DockerSuite) TestTwoContainersInNetHost(c *check.C) {
 	dockerCmd(c, "stop", "second")
 }
 
+func (s *DockerSuite) TestContainersInUserDefinedNetwork(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork")
+	dockerCmd(c, "run", "-d", "--net=testnetwork", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	dockerCmd(c, "run", "-t", "--net=testnetwork", "--name=second", "busybox", "ping", "-c", "1", "first")
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork")
+}
+
+func (s *DockerSuite) TestContainersInMultipleNetworks(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	// Create 2 networks using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork2")
+	// Run and connect containers to testnetwork1
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+	// Check connectivity between containers in testnetwork2
+	dockerCmd(c, "exec", "first", "ping", "-c", "1", "second.testnetwork1")
+	// Connect containers to testnetwork2
+	dockerCmd(c, "network", "connect", "testnetwork2", "first")
+	dockerCmd(c, "network", "connect", "testnetwork2", "second")
+	// Check connectivity between containers
+	dockerCmd(c, "exec", "second", "ping", "-c", "1", "first.testnetwork2")
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+	dockerCmd(c, "network", "rm", "testnetwork2")
+}
+
+func (s *DockerSuite) TestContainersNetworkIsolation(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	// Create 2 networks using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork2")
+	// Run 1 container in testnetwork1 and another in testnetwork2
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	dockerCmd(c, "run", "-d", "--net=testnetwork2", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+
+	// Check Isolation between containers : ping must fail
+	_, _, err := dockerCmdWithError("exec", "first", "ping", "-c", "1", "second")
+	c.Assert(err, check.NotNil)
+	// Connect first container to testnetwork2
+	dockerCmd(c, "network", "connect", "testnetwork2", "first")
+	// ping must succeed now
+	_, _, err = dockerCmdWithError("exec", "first", "ping", "-c", "1", "second")
+	c.Assert(err, check.IsNil)
+
+	// Disconnect first container from testnetwork2
+	dockerCmd(c, "network", "disconnect", "testnetwork2", "first")
+	// ping must fail again
+	_, _, err = dockerCmdWithError("exec", "first", "ping", "-c", "1", "second")
+	c.Assert(err, check.NotNil)
+
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+	dockerCmd(c, "network", "rm", "testnetwork2")
+}
+
+func (s *DockerSuite) TestNetworkRmWithActiveContainers(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	// Create 2 networks using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+	// Run and connect containers to testnetwork1
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+	// Network delete with active containers must fail
+	_, _, err := dockerCmdWithError("network", "rm", "testnetwork1")
+	c.Assert(err, check.NotNil)
+
+	dockerCmd(c, "stop", "first")
+	_, _, err = dockerCmdWithError("network", "rm", "testnetwork1")
+	c.Assert(err, check.NotNil)
+
+	dockerCmd(c, "stop", "second")
+	// Network delete must succeed after all the connected containers are inactive
+	dockerCmd(c, "network", "rm", "testnetwork1")
+}
+
+func (s *DockerSuite) TestContainerRestartInMultipleNetworks(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	// Create 2 networks using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork2")
+	// Run and connect containers to testnetwork1
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+	// Check connectivity between containers in testnetwork2
+	dockerCmd(c, "exec", "first", "ping", "-c", "1", "second.testnetwork1")
+	// Connect containers to testnetwork2
+	dockerCmd(c, "network", "connect", "testnetwork2", "first")
+	dockerCmd(c, "network", "connect", "testnetwork2", "second")
+	// Check connectivity between containers
+	dockerCmd(c, "exec", "second", "ping", "-c", "1", "first.testnetwork2")
+
+	// Stop second container and test ping failures on both networks
+	dockerCmd(c, "stop", "second")
+	_, _, err := dockerCmdWithError("exec", "first", "ping", "-c", "1", "second.testnetwork1")
+	c.Assert(err, check.NotNil)
+	_, _, err = dockerCmdWithError("exec", "first", "ping", "-c", "1", "second.testnetwork2")
+	c.Assert(err, check.NotNil)
+
+	// Start second container and connectivity must be restored on both networks
+	dockerCmd(c, "start", "second")
+	dockerCmd(c, "exec", "first", "ping", "-c", "1", "second.testnetwork1")
+	dockerCmd(c, "exec", "second", "ping", "-c", "1", "first.testnetwork2")
+
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+	dockerCmd(c, "network", "rm", "testnetwork2")
+}
+
+func (s *DockerSuite) TestContainerWithConflictingHostNetworks(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	// Run a container with --net=host
+	dockerCmd(c, "run", "-d", "--net=host", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+
+	// Create a network using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+
+	// Connecting to the user defined network must fail
+	_, _, err := dockerCmdWithError("network", "connect", "testnetwork1", "first")
+	c.Assert(err, check.NotNil)
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+}
+
+func (s *DockerSuite) TestContainerWithConflictingSharedNetwork(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	dockerCmd(c, "run", "-d", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+	// Run second container in first container's network namespace
+	dockerCmd(c, "run", "-d", "--net=container:first", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+
+	// Create a network using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+
+	// Connecting to the user defined network must fail
+	out, _, err := dockerCmdWithError("network", "connect", "testnetwork1", "second")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, runconfig.ErrConflictSharedNetwork.Error())
+
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+}
+
+func (s *DockerSuite) TestContainerWithConflictingNoneNetwork(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	dockerCmd(c, "run", "-d", "--net=none", "--name=first", "busybox", "top")
+	c.Assert(waitRun("first"), check.IsNil)
+
+	// Create a network using bridge driver
+	dockerCmd(c, "network", "create", "-d", "bridge", "testnetwork1")
+
+	// Connecting to the user defined network must fail
+	out, _, err := dockerCmdWithError("network", "connect", "testnetwork1", "first")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, runconfig.ErrConflictNoNetwork.Error())
+
+	// create a container connected to testnetwork1
+	dockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=second", "busybox", "top")
+	c.Assert(waitRun("second"), check.IsNil)
+
+	// Connect second container to none network. it must fail as well
+	_, _, err = dockerCmdWithError("network", "connect", "none", "second")
+	c.Assert(err, check.NotNil)
+
+	dockerCmd(c, "stop", "first")
+	dockerCmd(c, "stop", "second")
+	dockerCmd(c, "network", "rm", "testnetwork1")
+}
+
 // #11957 - stdin with no tty does not exit if stdin is not closed even though container exited
 func (s *DockerSuite) TestRunStdinBlockedAfterContainerExit(c *check.C) {
 	cmd := exec.Command(dockerBinary, "run", "-i", "--name=test", "busybox", "true")
@@ -3406,4 +3612,18 @@ func (s *DockerSuite) TestRunStdinBlockedAfterContainerExit(c *check.C) {
 	case <-time.After(30 * time.Second):
 		c.Fatal("timeout waiting for command to exit")
 	}
+}
+
+func (s *DockerSuite) TestRunWrongCpusetCpusFlagValue(c *check.C) {
+	out, _, err := dockerCmdWithError("run", "--cpuset-cpus", "1-10,11--", "busybox", "true")
+	c.Assert(err, check.NotNil)
+	expected := "Error response from daemon: Invalid value 1-10,11-- for cpuset cpus.\n"
+	c.Assert(out, check.Equals, expected, check.Commentf("Expected output to contain %q, got %q", expected, out))
+}
+
+func (s *DockerSuite) TestRunWrongCpusetMemsFlagValue(c *check.C) {
+	out, _, err := dockerCmdWithError("run", "--cpuset-mems", "1-42--", "busybox", "true")
+	c.Assert(err, check.NotNil)
+	expected := "Error response from daemon: Invalid value 1-42-- for cpuset mems.\n"
+	c.Assert(out, check.Equals, expected, check.Commentf("Expected output to contain %q, got %q", expected, out))
 }

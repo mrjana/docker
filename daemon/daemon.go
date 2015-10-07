@@ -39,6 +39,7 @@ import (
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/docker/docker/pkg/nat"
+	"github.com/docker/docker/pkg/parsers/filters"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/stringutils"
@@ -528,6 +529,36 @@ func (daemon *Daemon) GetByName(name string) (*Container, error) {
 	return e, nil
 }
 
+// GetEventFilter returns a filters.Filter for a set of filters
+func (daemon *Daemon) GetEventFilter(filter filters.Args) *events.Filter {
+	// incoming container filter can be name, id or partial id, convert to
+	// a full container id
+	for i, cn := range filter["container"] {
+		c, err := daemon.Get(cn)
+		if err != nil {
+			filter["container"][i] = ""
+		} else {
+			filter["container"][i] = c.ID
+		}
+	}
+	return events.NewFilter(filter, daemon.GetLabels)
+}
+
+// GetLabels for a container or image id
+func (daemon *Daemon) GetLabels(id string) map[string]string {
+	// TODO: TestCase
+	container := daemon.containers.Get(id)
+	if container != nil {
+		return container.Config.Labels
+	}
+
+	img, err := daemon.repositories.LookupImage(id)
+	if err == nil {
+		return img.ContainerConfig.Labels
+	}
+	return nil
+}
+
 // children returns all child containers of the container with the
 // given name. The containers are returned as a map from the container
 // name to a pointer to Container.
@@ -720,7 +751,17 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 		}
 	}
 
-	d.netController, err = initNetworkController(config)
+	// Discovery is only enabled when the daemon is launched with an address to advertise.  When
+	// initialized, the daemon is registered and we can store the discovery backend as its read-only
+	// DiscoveryWatcher version.
+	if config.ClusterStore != "" && config.ClusterAdvertise != "" {
+		var err error
+		if d.discoveryWatcher, err = initDiscovery(config.ClusterStore, config.ClusterAdvertise); err != nil {
+			return nil, fmt.Errorf("discovery initialization failed (%v)", err)
+		}
+	}
+
+	d.netController, err = d.initNetworkController(config)
 	if err != nil {
 		return nil, fmt.Errorf("Error initializing network controller: %v", err)
 	}
@@ -752,16 +793,6 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	ed, err := execdrivers.NewDriver(config.ExecDriver, config.ExecOptions, config.ExecRoot, config.Root, sysInitPath, sysInfo)
 	if err != nil {
 		return nil, err
-	}
-
-	// Discovery is only enabled when the daemon is launched with an address to advertise.  When
-	// initialized, the daemon is registered and we can store the discovery backend as its read-only
-	// DiscoveryWatcher version.
-	if config.ClusterStore != "" && config.ClusterAdvertise != "" {
-		var err error
-		if d.discoveryWatcher, err = initDiscovery(config.ClusterStore, config.ClusterAdvertise); err != nil {
-			return nil, fmt.Errorf("discovery initialization failed (%v)", err)
-		}
 	}
 
 	d.ID = trustKey.PublicKey().KeyID()
@@ -1129,11 +1160,6 @@ func (daemon *Daemon) verifyContainerSettings(hostConfig *runconfig.HostConfig, 
 
 	// Now do platform-specific verification
 	return verifyPlatformContainerSettings(daemon, hostConfig, config)
-}
-
-// NetworkController exposes the libnetwork interface to manage networks.
-func (daemon *Daemon) NetworkController() libnetwork.NetworkController {
-	return daemon.netController
 }
 
 func configureVolumes(config *Config) (*store.VolumeStore, error) {

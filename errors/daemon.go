@@ -654,7 +654,7 @@ var (
 		Value:          "CONTAINERNOTRUNNING",
 		Message:        "Container %s is not running: %s",
 		Description:    "An attempt was made to retrieve the information about an 'exec' but the container is not running",
-		HTTPStatusCode: http.StatusInternalServerError,
+		HTTPStatusCode: http.StatusConflict,
 	})
 
 	// ErrorCodeNoExecID is generated when we try to get the info
@@ -672,7 +672,7 @@ var (
 		Value:          "EXECPAUSED",
 		Message:        "Container %s is paused, unpause the container before exec",
 		Description:    "An attempt to start an 'exec' was made, but the owning container is paused",
-		HTTPStatusCode: http.StatusInternalServerError,
+		HTTPStatusCode: http.StatusConflict,
 	})
 
 	// ErrorCodeExecRunning is generated when we try to start an exec
@@ -825,6 +825,42 @@ var (
 		Value:          "RMVOLUME",
 		Message:        "Error while removing volume %s: %v",
 		Description:    "While trying to delete a container, there was an error trying to delete one of its volumes",
+		HTTPStatusCode: http.StatusInternalServerError,
+	})
+
+	// ErrorCodeInvalidCpusetCpus is generated when user provided cpuset CPUs
+	// are invalid.
+	ErrorCodeInvalidCpusetCpus = errcode.Register(errGroup, errcode.ErrorDescriptor{
+		Value:          "INVALIDCPUSETCPUS",
+		Message:        "Invalid value %s for cpuset cpus.",
+		Description:    "While verifying the container's 'HostConfig', CpusetCpus value was in an incorrect format",
+		HTTPStatusCode: http.StatusInternalServerError,
+	})
+
+	// ErrorCodeInvalidCpusetMems is generated when user provided cpuset mems
+	// are invalid.
+	ErrorCodeInvalidCpusetMems = errcode.Register(errGroup, errcode.ErrorDescriptor{
+		Value:          "INVALIDCPUSETMEMS",
+		Message:        "Invalid value %s for cpuset mems.",
+		Description:    "While verifying the container's 'HostConfig', CpusetMems value was in an incorrect format",
+		HTTPStatusCode: http.StatusInternalServerError,
+	})
+
+	// ErrorCodeNotAvailableCpusetCpus is generated when user provided cpuset
+	// CPUs aren't available in the container's cgroup.
+	ErrorCodeNotAvailableCpusetCpus = errcode.Register(errGroup, errcode.ErrorDescriptor{
+		Value:          "NOTAVAILABLECPUSETCPUS",
+		Message:        "Requested CPUs are not available - requested %s, available: %s.",
+		Description:    "While verifying the container's 'HostConfig', cpuset CPUs provided aren't available in the container's cgroup available set",
+		HTTPStatusCode: http.StatusInternalServerError,
+	})
+
+	// ErrorCodeNotAvailableCpusetMems is generated when user provided cpuset
+	// memory nodes aren't available in the container's cgroup.
+	ErrorCodeNotAvailableCpusetMems = errcode.Register(errGroup, errcode.ErrorDescriptor{
+		Value:          "NOTAVAILABLECPUSETMEMS",
+		Message:        "Requested memory nodes are not available - requested %s, available: %s.",
+		Description:    "While verifying the container's 'HostConfig', cpuset memory nodes provided aren't available in the container's cgroup available set",
 		HTTPStatusCode: http.StatusInternalServerError,
 	})
 )

@@ -8,71 +8,70 @@ import (
 
 	"github.com/docker/docker/pkg/discovery"
 	"github.com/docker/libkv/store"
-	libkvmock "github.com/docker/libkv/store/mock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+
+	"github.com/go-check/check"
 )
 
-func TestInitialize(t *testing.T) {
-	storeMock, err := libkvmock.New([]string{"127.0.0.1"}, nil)
-	assert.NotNil(t, storeMock)
-	assert.NoError(t, err)
+// Hook up gocheck into the "go test" runner.
+func Test(t *testing.T) { check.TestingT(t) }
 
+type DiscoverySuite struct{}
+
+var _ = check.Suite(&DiscoverySuite{})
+
+func (ds *DiscoverySuite) TestInitialize(c *check.C) {
+	storeMock := &FakeStore{
+		Endpoints: []string{"127.0.0.1"},
+	}
 	d := &Discovery{backend: store.CONSUL}
 	d.Initialize("127.0.0.1", 0, 0)
 	d.store = storeMock
 
-	s := d.store.(*libkvmock.Mock)
-	assert.Len(t, s.Endpoints, 1)
-	assert.Equal(t, s.Endpoints[0], "127.0.0.1")
-	assert.Equal(t, d.path, discoveryPath)
+	s := d.store.(*FakeStore)
+	c.Assert(s.Endpoints, check.HasLen, 1)
+	c.Assert(s.Endpoints[0], check.Equals, "127.0.0.1")
+	c.Assert(d.path, check.Equals, discoveryPath)
 
-	storeMock, err = libkvmock.New([]string{"127.0.0.1:1234"}, nil)
-	assert.NotNil(t, storeMock)
-	assert.NoError(t, err)
-
+	storeMock = &FakeStore{
+		Endpoints: []string{"127.0.0.1:1234"},
+	}
 	d = &Discovery{backend: store.CONSUL}
 	d.Initialize("127.0.0.1:1234/path", 0, 0)
 	d.store = storeMock
 
-	s = d.store.(*libkvmock.Mock)
-	assert.Len(t, s.Endpoints, 1)
-	assert.Equal(t, s.Endpoints[0], "127.0.0.1:1234")
-	assert.Equal(t, d.path, "path/"+discoveryPath)
+	s = d.store.(*FakeStore)
+	c.Assert(s.Endpoints, check.HasLen, 1)
+	c.Assert(s.Endpoints[0], check.Equals, "127.0.0.1:1234")
+	c.Assert(d.path, check.Equals, "path/"+discoveryPath)
 
-	storeMock, err = libkvmock.New([]string{"127.0.0.1:1234", "127.0.0.2:1234", "127.0.0.3:1234"}, nil)
-	assert.NotNil(t, storeMock)
-	assert.NoError(t, err)
-
+	storeMock = &FakeStore{
+		Endpoints: []string{"127.0.0.1:1234", "127.0.0.2:1234", "127.0.0.3:1234"},
+	}
 	d = &Discovery{backend: store.CONSUL}
 	d.Initialize("127.0.0.1:1234,127.0.0.2:1234,127.0.0.3:1234/path", 0, 0)
 	d.store = storeMock
 
-	s = d.store.(*libkvmock.Mock)
-	if assert.Len(t, s.Endpoints, 3) {
-		assert.Equal(t, s.Endpoints[0], "127.0.0.1:1234")
-		assert.Equal(t, s.Endpoints[1], "127.0.0.2:1234")
-		assert.Equal(t, s.Endpoints[2], "127.0.0.3:1234")
-	}
-	assert.Equal(t, d.path, "path/"+discoveryPath)
+	s = d.store.(*FakeStore)
+	c.Assert(s.Endpoints, check.HasLen, 3)
+	c.Assert(s.Endpoints[0], check.Equals, "127.0.0.1:1234")
+	c.Assert(s.Endpoints[1], check.Equals, "127.0.0.2:1234")
+	c.Assert(s.Endpoints[2], check.Equals, "127.0.0.3:1234")
+
+	c.Assert(d.path, check.Equals, "path/"+discoveryPath)
 }
 
-func TestWatch(t *testing.T) {
-	storeMock, err := libkvmock.New([]string{"127.0.0.1:1234"}, nil)
-	assert.NotNil(t, storeMock)
-	assert.NoError(t, err)
+func (ds *DiscoverySuite) TestWatch(c *check.C) {
+	mockCh := make(chan []*store.KVPair)
+
+	storeMock := &FakeStore{
+		Endpoints:  []string{"127.0.0.1:1234"},
+		mockKVChan: mockCh,
+	}
 
 	d := &Discovery{backend: store.CONSUL}
 	d.Initialize("127.0.0.1:1234/path", 0, 0)
 	d.store = storeMock
 
-	s := d.store.(*libkvmock.Mock)
-	mockCh := make(chan []*store.KVPair)
-
-	// The first watch will fail.
-	s.On("WatchTree", "path/"+discoveryPath, mock.Anything).Return(mockCh, errors.New("test error")).Once()
-	// The second one will succeed.
-	s.On("WatchTree", "path/"+discoveryPath, mock.Anything).Return(mockCh, nil).Once()
 	expected := discovery.Entries{
 		&discovery.Entry{Host: "1.1.1.1", Port: "1111"},
 		&discovery.Entry{Host: "2.2.2.2", Port: "2222"},
@@ -86,7 +85,7 @@ func TestWatch(t *testing.T) {
 	ch, errCh := d.Watch(stopCh)
 
 	// It should fire an error since the first WatchTree call failed.
-	assert.EqualError(t, <-errCh, "test error")
+	c.Assert(<-errCh, check.ErrorMatches, "test error")
 	// We have to drain the error channel otherwise Watch will get stuck.
 	go func() {
 		for range errCh {
@@ -95,25 +94,84 @@ func TestWatch(t *testing.T) {
 
 	// Push the entries into the store channel and make sure discovery emits.
 	mockCh <- kvs
-	assert.Equal(t, <-ch, expected)
+	c.Assert(<-ch, check.DeepEquals, expected)
 
 	// Add a new entry.
 	expected = append(expected, &discovery.Entry{Host: "3.3.3.3", Port: "3333"})
 	kvs = append(kvs, &store.KVPair{Key: path.Join("path", discoveryPath, "3.3.3.3"), Value: []byte("3.3.3.3:3333")})
 	mockCh <- kvs
-	assert.Equal(t, <-ch, expected)
+	c.Assert(<-ch, check.DeepEquals, expected)
 
-	// Make sure that if an error occurs it retries.
-	// This third call to WatchTree will be checked later by AssertExpectations.
-	s.On("WatchTree", "path/"+discoveryPath, mock.Anything).Return(mockCh, nil)
 	close(mockCh)
 	// Give it enough time to call WatchTree.
 	time.Sleep(3)
 
 	// Stop and make sure it closes all channels.
 	close(stopCh)
-	assert.Nil(t, <-ch)
-	assert.Nil(t, <-errCh)
+	c.Assert(<-ch, check.IsNil)
+	c.Assert(<-errCh, check.IsNil)
+}
 
-	s.AssertExpectations(t)
+// FakeStore implements store.Store methods. It mocks all store
+// function in a simple, naive way.
+type FakeStore struct {
+	Endpoints  []string
+	Options    *store.Config
+	mockKVChan <-chan []*store.KVPair
+
+	watchTreeCallCount int
+}
+
+func (s *FakeStore) Put(key string, value []byte, options *store.WriteOptions) error {
+	return nil
+}
+
+func (s *FakeStore) Get(key string) (*store.KVPair, error) {
+	return nil, nil
+}
+
+func (s *FakeStore) Delete(key string) error {
+	return nil
+}
+
+func (s *FakeStore) Exists(key string) (bool, error) {
+	return true, nil
+}
+
+func (s *FakeStore) Watch(key string, stopCh <-chan struct{}) (<-chan *store.KVPair, error) {
+	return nil, nil
+}
+
+// WatchTree will fail the first time, and return the mockKVchan afterwards.
+// This is the behaviour we need for testing.. If we need 'moar', should update this.
+func (s *FakeStore) WatchTree(directory string, stopCh <-chan struct{}) (<-chan []*store.KVPair, error) {
+	if s.watchTreeCallCount == 0 {
+		s.watchTreeCallCount = 1
+		return nil, errors.New("test error")
+	}
+	// First calls error
+	return s.mockKVChan, nil
+}
+
+func (s *FakeStore) NewLock(key string, options *store.LockOptions) (store.Locker, error) {
+	return nil, nil
+}
+
+func (s *FakeStore) List(directory string) ([]*store.KVPair, error) {
+	return []*store.KVPair{}, nil
+}
+
+func (s *FakeStore) DeleteTree(directory string) error {
+	return nil
+}
+
+func (s *FakeStore) AtomicPut(key string, value []byte, previous *store.KVPair, options *store.WriteOptions) (bool, *store.KVPair, error) {
+	return true, nil, nil
+}
+
+func (s *FakeStore) AtomicDelete(key string, previous *store.KVPair) (bool, error) {
+	return true, nil
+}
+
+func (s *FakeStore) Close() {
 }

@@ -14,8 +14,9 @@ import (
 	systemdActivation "github.com/coreos/go-systemd/activation"
 )
 
-// newServer sets up the required serverClosers and does protocol specific checking.
-func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
+// newServer sets up the required HTTPServers and does protocol specific checking.
+// newServer does not set any muxers, you should set it later to Handler field
+func (s *Server) newServer(proto, addr string) ([]*HTTPServer, error) {
 	var (
 		err error
 		ls  []net.Listener
@@ -26,10 +27,6 @@ func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
 		if err != nil {
 			return nil, err
 		}
-		// We don't want to start serving on these sockets until the
-		// daemon is initialized and installed. Otherwise required handlers
-		// won't be ready.
-		<-s.start
 	case "tcp":
 		l, err := s.initTCPSocket(addr)
 		if err != nil {
@@ -45,12 +42,11 @@ func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
 	default:
 		return nil, fmt.Errorf("Invalid protocol format: %q", proto)
 	}
-	var res []serverCloser
+	var res []*HTTPServer
 	for _, l := range ls {
 		res = append(res, &HTTPServer{
 			&http.Server{
-				Addr:    addr,
-				Handler: s.CreateMux(),
+				Addr: addr,
 			},
 			l,
 		})
