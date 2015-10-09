@@ -309,6 +309,9 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 	if dconfig == nil {
 		return options, nil
 	}
+
+	options = append(options, nwconfig.OptionDataDir(dconfig.Root))
+
 	if strings.TrimSpace(dconfig.DefaultNetwork) != "" {
 		dn := strings.Split(dconfig.DefaultNetwork, ":")
 		if len(dn) < 2 {
@@ -463,7 +466,6 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 			netlabel.GenericData: netOption,
 			netlabel.EnableIPv6:  config.Bridge.EnableIPv6,
 		}),
-		libnetwork.NetworkOptionPersist(false),
 		libnetwork.NetworkOptionIpam("default", "", v4Conf, v6Conf))
 	if err != nil {
 		return fmt.Errorf("Error creating default \"bridge\" network: %v", err)
