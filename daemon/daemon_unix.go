@@ -23,8 +23,10 @@ import (
 	"github.com/docker/docker/utils"
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
+	"github.com/docker/libnetwork/ipamutils"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
+	"github.com/docker/libnetwork/types"
 	"github.com/opencontainers/runc/libcontainer/label"
 	"github.com/vishvananda/netlink"
 )
@@ -387,6 +389,12 @@ func driverOptions(config *Config) []nwconfig.Option {
 }
 
 func initBridgeDriver(controller libnetwork.NetworkController, config *Config) error {
+	if n, err := controller.NetworkByName("bridge"); err == nil {
+		if err = n.Delete(); err != nil {
+			return fmt.Errorf("could not delete the default bridge network: %v", err)
+		}
+	}
+
 	netOption := options.Generic{
 		"BridgeName":         config.Bridge.Iface,
 		"DefaultBridge":      true,
@@ -404,6 +412,15 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 	ipamV6Conf := libnetwork.IpamConf{}
 	ipamV4Conf.AuxAddresses = make(map[string]string)
 	ipamV6Conf.AuxAddresses = make(map[string]string)
+
+	if nw, _, err := ipamutils.ElectInterfaceAddresses(config.Bridge.Iface); err == nil {
+		ipamV4Conf := &libnetwork.IpamConf{PreferredPool: nw.String()}
+		hip, _ := types.GetHostPartIP(nw.IP, nw.Mask)
+		if hip.IsGlobalUnicast() {
+			ipamV4Conf.Gateway = nw.IP.String()
+		}
+	}
+
 	if config.Bridge.IP != "" {
 		ipamV4Conf.PreferredPool = config.Bridge.IP
 		ip, _, err := net.ParseCIDR(config.Bridge.IP)

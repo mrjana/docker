@@ -143,6 +143,12 @@ func OptionKVOpts(opts map[string]string) Option {
 			} else {
 				c.Scopes[datastore.GlobalScope].Client.Config.TLS = tlsConfig
 			}
+			// Workaround libkv/etcd bug for https
+			c.Scopes[datastore.GlobalScope].Client.Config.ClientTLS = &store.ClientTLSConfig{
+				CACertFile: opts["kv.cacertfile"],
+				CertFile:   opts["kv.certfile"],
+				KeyFile:    opts["kv.keyfile"],
+			}
 		} else {
 			log.Info("Option Initializing KV without TLS")
 		}
@@ -181,7 +187,7 @@ func (c *Config) ProcessOptions(options ...Option) {
 
 // IsValidName validates configuration objects supported by libnetwork
 func IsValidName(name string) bool {
-	if strings.TrimSpace(name) == "" || strings.Contains(name, ".") {
+	if strings.TrimSpace(name) == "" {
 		return false
 	}
 	return true

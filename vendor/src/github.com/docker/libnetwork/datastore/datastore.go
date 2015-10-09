@@ -5,8 +5,6 @@ import (
 	"log"
 	"reflect"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/docker/libkv"
 	"github.com/docker/libkv/store"
@@ -57,7 +55,6 @@ type datastore struct {
 	scope string
 	store store.Store
 	cache *cache
-	cfg   ScopeCfg
 }
 
 // KVObject is  Key/Value interface used by objects to be part of the DataStore
@@ -95,8 +92,7 @@ type KVConstructor interface {
 
 // ScopeCfg represents Datastore configuration.
 type ScopeCfg struct {
-	Embedded bool
-	Client   ScopeClientCfg
+	Client ScopeClientCfg
 }
 
 // ScopeClientCfg represents Datastore Client-only mode configuration
@@ -104,12 +100,6 @@ type ScopeClientCfg struct {
 	Provider string
 	Address  string
 	Config   *store.Config
-}
-
-type storeTableData struct {
-	refCnt int
-	store  store.Store
-	once   sync.Once
 }
 
 const (
@@ -129,20 +119,16 @@ const (
 
 var (
 	defaultScopes = makeDefaultScopes()
-	storeLock     sync.Mutex
-	storeTable    = make(map[ScopeCfg]*storeTableData)
 )
 
 func makeDefaultScopes() map[string]*ScopeCfg {
 	def := make(map[string]*ScopeCfg)
 	def[LocalScope] = &ScopeCfg{
-		Embedded: true,
 		Client: ScopeClientCfg{
 			Provider: "boltdb",
 			Address:  defaultPrefix + "/boltdb.db",
 			Config: &store.Config{
-				Bucket:            "libnetwork",
-				ConnectionTimeout: 3 * time.Second,
+				Bucket: "libnetwork",
 			},
 		},
 	}
@@ -200,7 +186,11 @@ func ParseKey(key string) ([]string, error) {
 }
 
 // newClient used to connect to KV Store
-func newClient(scope string, kv string, addrs string, config *store.Config, cached bool) (*datastore, error) {
+func newClient(scope string, kv string, addrs string, config *store.Config, cached bool) (DataStore, error) {
+	if cached && scope != LocalScope {
+		return nil, fmt.Errorf("caching supported only for scope %s", LocalScope)
+	}
+
 	if config == nil {
 		config = &store.Config{}
 	}
@@ -219,76 +209,24 @@ func newClient(scope string, kv string, addrs string, config *store.Config, cach
 
 // NewDataStore creates a new instance of LibKV data store
 func NewDataStore(scope string, cfg *ScopeCfg) (DataStore, error) {
-	var (
-		err error
-		ds  *datastore
-	)
-
-	if !cfg.IsValid() {
-		return nil, fmt.Errorf("invalid datastore configuration passed for scope %s", scope)
-	}
-
-	storeLock.Lock()
-	sdata, ok := storeTable[*cfg]
-	if ok {
-		sdata.refCnt++
-		// If sdata already has a store nothing to do. Just
-		// create a datastore handle using it and return with
-		// that.
-		if sdata.store != nil {
-			storeLock.Unlock()
-			return &datastore{scope: scope, cfg: *cfg, store: sdata.store}, nil
-		}
-	} else {
-		// If sdata is not present create one and add ito
-		// storeTable while holding the lock.
-		sdata = &storeTableData{refCnt: 1}
-		storeTable[*cfg] = sdata
-	}
-	storeLock.Unlock()
-
-	// We come here either because:
-	//
-	// 1. We just created the store table data OR
-	// 2. We picked up the store table data from table but store was not initialized.
-	//
-	// In both cases the once function will ensure the store
-	// initialization happens exactly once
-	sdata.once.Do(func() {
-		ds, err = newClient(scope, cfg.Client.Provider, cfg.Client.Address, cfg.Client.Config, scope == LocalScope)
-		if err != nil {
-			return
+	if cfg == nil || cfg.Client.Provider == "" || cfg.Client.Address == "" {
+		c, ok := defaultScopes[scope]
+		if !ok || c.Client.Provider == "" || c.Client.Address == "" {
+			return nil, fmt.Errorf("unexpected scope %s without configuration passed", scope)
 		}
 
-		ds.cfg = *cfg
-		sdata.store = ds.store
-	})
-
-	if err != nil {
-		return nil, err
+		cfg = c
 	}
 
-	return ds, nil
+	var cached bool
+	if scope == LocalScope {
+		cached = true
+	}
+
+	return newClient(scope, cfg.Client.Provider, cfg.Client.Address, cfg.Client.Config, cached)
 }
 
 func (ds *datastore) Close() {
-	storeLock.Lock()
-	sdata := storeTable[ds.cfg]
-
-	if sdata == nil {
-		storeLock.Unlock()
-		return
-	}
-
-	sdata.refCnt--
-	if sdata.refCnt > 0 {
-		storeLock.Unlock()
-		return
-	}
-
-	delete(storeTable, ds.cfg)
-	storeLock.Unlock()
-
 	ds.store.Close()
 }
 

@@ -16,7 +16,6 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
-	"github.com/docker/libnetwork/ipallocator"
 	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/netutils"
@@ -42,10 +41,6 @@ const (
 	DefaultGatewayV6AuxKey = "DefaultGatewayIPv6"
 )
 
-var (
-	ipAllocator *ipallocator.IPAllocator
-)
-
 // configuration info for the "bridge" driver.
 type configuration struct {
 	EnableIPForwarding  bool
@@ -55,6 +50,7 @@ type configuration struct {
 
 // networkConfiguration for network specific configuration
 type networkConfiguration struct {
+	ID                 string
 	BridgeName         string
 	EnableIPv6         bool
 	EnableIPMasquerade bool
@@ -63,10 +59,12 @@ type networkConfiguration struct {
 	DefaultBindingIP   net.IP
 	DefaultBridge      bool
 	// Internal fields set after ipam data parsing
-	addressIPv4        *net.IPNet
-	addressIPv6        *net.IPNet
-	defaultGatewayIPv4 net.IP
-	defaultGatewayIPv6 net.IP
+	AddressIPv4        *net.IPNet
+	AddressIPv6        *net.IPNet
+	DefaultGatewayIPv4 net.IP
+	DefaultGatewayIPv6 net.IP
+	dbIndex            uint64
+	dbExists           bool
 }
 
 // endpointConfiguration represents the user specified configuration for the sandbox endpoint
@@ -109,12 +107,12 @@ type driver struct {
 	natChain    *iptables.ChainInfo
 	filterChain *iptables.ChainInfo
 	networks    map[string]*bridgeNetwork
+	store       datastore.DataStore
 	sync.Mutex
 }
 
 // New constructs a new bridge driver
 func newDriver() *driver {
-	ipAllocator = ipallocator.New()
 	return &driver{networks: map[string]*bridgeNetwork{}, config: &configuration{}}
 }
 
@@ -154,18 +152,18 @@ func (c *networkConfiguration) Validate() error {
 	}
 
 	// If bridge v4 subnet is specified
-	if c.addressIPv4 != nil {
+	if c.AddressIPv4 != nil {
 		// If default gw is specified, it must be part of bridge subnet
-		if c.defaultGatewayIPv4 != nil {
-			if !c.addressIPv4.Contains(c.defaultGatewayIPv4) {
+		if c.DefaultGatewayIPv4 != nil {
+			if !c.AddressIPv4.Contains(c.DefaultGatewayIPv4) {
 				return &ErrInvalidGateway{}
 			}
 		}
 	}
 
-	// If default v6 gw is specified, addressIPv6 must be specified and gw must belong to addressIPv6 subnet
-	if c.EnableIPv6 && c.defaultGatewayIPv6 != nil {
-		if c.addressIPv6 == nil || !c.addressIPv6.Contains(c.defaultGatewayIPv6) {
+	// If default v6 gw is specified, AddressIPv6 must be specified and gw must belong to AddressIPv6 subnet
+	if c.EnableIPv6 && c.DefaultGatewayIPv6 != nil {
+		if c.AddressIPv6 == nil || !c.AddressIPv6.Contains(c.DefaultGatewayIPv6) {
 			return &ErrInvalidGateway{}
 		}
 	}
@@ -173,29 +171,29 @@ func (c *networkConfiguration) Validate() error {
 }
 
 // Conflicts check if two NetworkConfiguration objects overlap
-func (c *networkConfiguration) Conflicts(o *networkConfiguration) bool {
+func (c *networkConfiguration) Conflicts(o *networkConfiguration) error {
 	if o == nil {
-		return false
+		return fmt.Errorf("same configuration")
 	}
 
 	// Also empty, becasue only one network with empty name is allowed
 	if c.BridgeName == o.BridgeName {
-		return true
+		return fmt.Errorf("networks have same name")
 	}
 
 	// They must be in different subnets
-	if (c.addressIPv4 != nil && o.addressIPv4 != nil) &&
-		(c.addressIPv4.Contains(o.addressIPv4.IP) || o.addressIPv4.Contains(c.addressIPv4.IP)) {
-		return true
+	if (c.AddressIPv4 != nil && o.AddressIPv4 != nil) &&
+		(c.AddressIPv4.Contains(o.AddressIPv4.IP) || o.AddressIPv4.Contains(c.AddressIPv4.IP)) {
+		return fmt.Errorf("networks have overlapping IPv4")
 	}
 
 	// They must be in different v6 subnets
-	if (c.addressIPv6 != nil && o.addressIPv6 != nil) &&
-		(c.addressIPv6.Contains(o.addressIPv6.IP) || o.addressIPv6.Contains(c.addressIPv6.IP)) {
-		return true
+	if (c.AddressIPv6 != nil && o.AddressIPv6 != nil) &&
+		(c.AddressIPv6.Contains(o.AddressIPv6.IP) || o.AddressIPv6.Contains(c.AddressIPv6.IP)) {
+		return fmt.Errorf("networks have overlapping IPv6")
 	}
 
-	return false
+	return nil
 }
 
 // fromMap retrieve the configuration data from the map form.
@@ -356,14 +354,14 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 		if nwConfig.BridgeName == c.BridgeName {
 			return types.ForbiddenErrorf("conflicts with network %s (%s) by bridge name", nwID, nwConfig.BridgeName)
 		}
-		// If this network config specifies the addressIPv4, we need
+		// If this network config specifies the AddressIPv4, we need
 		// to make sure it does not conflict with any previously allocated
 		// bridges. This could not be completely caught by the config conflict
-		// check, because networks which config does not specify the addressIPv4
+		// check, because networks which config does not specify the AddressIPv4
 		// get their address and subnet selected by the driver (see electBridgeIPv4())
-		if c.addressIPv4 != nil {
-			if nwBridge.bridgeIPv4.Contains(c.addressIPv4.IP) ||
-				c.addressIPv4.Contains(nwBridge.bridgeIPv4.IP) {
+		if c.AddressIPv4 != nil {
+			if nwBridge.bridgeIPv4.Contains(c.AddressIPv4.IP) ||
+				c.AddressIPv4.Contains(nwBridge.bridgeIPv4.IP) {
 				return types.ForbiddenErrorf("conflicts with network %s (%s) by ip network", nwID, nwConfig.BridgeName)
 			}
 		}
@@ -375,6 +373,11 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 func (d *driver) configure(option map[string]interface{}) error {
 	var config *configuration
 	var err error
+
+	err = d.initStore(option)
+	if err != nil {
+		return err
+	}
 
 	d.Lock()
 	defer d.Unlock()
@@ -467,17 +470,21 @@ func (c *networkConfiguration) processIPAM(id string, ipamV4Data, ipamV6Data []d
 	}
 
 	if ipamV4Data[0].Gateway != nil {
-		c.addressIPv4 = types.GetIPNetCopy(ipamV4Data[0].Gateway)
+		c.AddressIPv4 = types.GetIPNetCopy(ipamV4Data[0].Gateway)
 	}
 
-	gw, ok := ipamV4Data[0].AuxAddresses[DefaultGatewayV4AuxKey]
-	if ok {
-		c.defaultGatewayIPv4 = gw.IP
+	if gw, ok := ipamV4Data[0].AuxAddresses[DefaultGatewayV4AuxKey]; ok {
+		c.DefaultGatewayIPv4 = gw.IP
 	}
 
-	gw, ok = ipamV4Data[0].AuxAddresses[DefaultGatewayV6AuxKey]
-	if ok {
-		c.defaultGatewayIPv6 = gw.IP
+	if len(ipamV6Data) > 0 {
+		if ipamV6Data[0].Gateway != nil {
+			c.AddressIPv6 = types.GetIPNetCopy(ipamV6Data[0].Gateway)
+		}
+
+		if gw, ok := ipamV6Data[0].AuxAddresses[DefaultGatewayV6AuxKey]; ok {
+			c.DefaultGatewayIPv6 = gw.IP
+		}
 	}
 
 	return nil
@@ -507,13 +514,15 @@ func parseNetworkOptions(id string, option options.Generic) (*networkConfigurati
 	if config.BridgeName == "" && config.DefaultBridge == false {
 		config.BridgeName = "br-" + id[:12]
 	}
+
+	config.ID = id
 	return config, nil
 }
 
 // Returns the non link-local IPv6 subnet for the containers attached to this bridge if found, nil otherwise
 func getV6Network(config *networkConfiguration, i *bridgeInterface) *net.IPNet {
-	if config.addressIPv6 != nil {
-		return config.addressIPv6
+	if config.AddressIPv6 != nil {
+		return config.AddressIPv6
 	}
 	if i.bridgeIPv6 != nil && i.bridgeIPv6.IP != nil && !i.bridgeIPv6.IP.IsLinkLocalUnicast() {
 		return i.bridgeIPv6
@@ -536,10 +545,6 @@ func (d *driver) getNetworks() []*bridgeNetwork {
 
 // Create a new network using bridge plugin
 func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Data, ipV6Data []driverapi.IPAMData) error {
-	var err error
-
-	defer osl.InitOSContext()()
-
 	// Sanity checks
 	d.Lock()
 	if _, ok := d.networks[id]; ok {
@@ -559,19 +564,32 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Dat
 		return err
 	}
 
+	if err = d.createNetwork(config); err != nil {
+		return err
+	}
+
+	return d.storeUpdate(config)
+}
+
+func (d *driver) createNetwork(config *networkConfiguration) error {
+	var err error
+
+	defer osl.InitOSContext()()
+
 	networkList := d.getNetworks()
 	for _, nw := range networkList {
 		nw.Lock()
 		nwConfig := nw.config
 		nw.Unlock()
-		if nwConfig.Conflicts(config) {
-			return types.ForbiddenErrorf("conflicts with network %s (%s)", nw.id, nw.config.BridgeName)
+		if err := nwConfig.Conflicts(config); err != nil {
+			return types.ForbiddenErrorf("cannot create network %s (%s): conflicts with network %s (%s): %s",
+				nwConfig.BridgeName, config.ID, nw.id, nw.config.BridgeName, err.Error())
 		}
 	}
 
 	// Create and set network handler in driver
 	network := &bridgeNetwork{
-		id:         id,
+		id:         config.ID,
 		endpoints:  make(map[string]*bridgeEndpoint),
 		config:     config,
 		portMapper: portmapper.New(),
@@ -579,14 +597,14 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Dat
 	}
 
 	d.Lock()
-	d.networks[id] = network
+	d.networks[config.ID] = network
 	d.Unlock()
 
 	// On failure make sure to reset driver network handler to nil
 	defer func() {
 		if err != nil {
 			d.Lock()
-			delete(d.networks, id)
+			delete(d.networks, config.ID)
 			d.Unlock()
 		}
 	}()
@@ -599,7 +617,7 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Dat
 	// networks. This step is needed now because driver might have now set the bridge
 	// name on this config struct. And because we need to check for possible address
 	// conflicts, so we need to check against operationa lnetworks.
-	if err = config.conflictsWithNetworks(id, networkList); err != nil {
+	if err = config.conflictsWithNetworks(config.ID, networkList); err != nil {
 		return err
 	}
 
@@ -626,7 +644,7 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Dat
 	// Even if a bridge exists try to setup IPv4.
 	bridgeSetup.queueStep(setupBridgeIPv4)
 
-	enableIPv6Forwarding := d.config.EnableIPForwarding && config.addressIPv6 != nil
+	enableIPv6Forwarding := d.config.EnableIPForwarding && config.AddressIPv6 != nil
 
 	// Conditionally queue setup steps depending on configuration values.
 	for _, step := range []struct {
@@ -657,10 +675,10 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Dat
 		{d.config.EnableIPTables, network.setupFirewalld},
 
 		// Setup DefaultGatewayIPv4
-		{config.defaultGatewayIPv4 != nil, setupGatewayIPv4},
+		{config.DefaultGatewayIPv4 != nil, setupGatewayIPv4},
 
 		// Setup DefaultGatewayIPv6
-		{config.defaultGatewayIPv6 != nil, setupGatewayIPv6},
+		{config.DefaultGatewayIPv6 != nil, setupGatewayIPv6},
 
 		// Add inter-network communication rules.
 		{d.config.EnableIPTables, setupNetworkIsolationRules},
@@ -699,10 +717,6 @@ func (d *driver) DeleteNetwork(nid string) error {
 	n.Lock()
 	config := n.config
 	n.Unlock()
-
-	if config.BridgeName == DefaultBridgeName {
-		return types.ForbiddenErrorf("default network of type \"%s\" cannot be deleted", networkType)
-	}
 
 	d.Lock()
 	delete(d.networks, nid)
@@ -748,8 +762,12 @@ func (d *driver) DeleteNetwork(nid string) error {
 		return err
 	}
 
-	// Programming
-	return netlink.LinkDel(n.bridge.Link)
+	// We only delete the bridge when it's not the default bridge. This is keep the backward compatible behavior.
+	if !config.DefaultBridge {
+		err = netlink.LinkDel(n.bridge.Link)
+	}
+
+	return d.storeDelete(config)
 }
 
 func addToBridge(ifaceName, bridgeName string) error {
@@ -1044,12 +1062,6 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 
 	// Remove port mappings. Do not stop endpoint delete on unmap failure
 	n.releasePorts(ep)
-
-	// Release the v4 address allocated to this endpoint's sandbox interface
-	err = ipAllocator.ReleaseIP(n.bridge.bridgeIPv4, ep.addr.IP)
-	if err != nil {
-		return err
-	}
 
 	// Try removal of link. Discard error: link pair might have
 	// already been deleted by sandbox delete. Make sure defer

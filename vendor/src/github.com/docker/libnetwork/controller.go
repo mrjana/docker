@@ -191,6 +191,8 @@ func New(cfgOptions ...config.Option) (NetworkController, error) {
 		return nil, err
 	}
 
+	c.sandboxCleanup()
+
 	if err := c.startExternalKeyListener(); err != nil {
 		return nil, err
 	}
@@ -343,15 +345,13 @@ func (c *controller) NewNetwork(networkType, name string, options ...NetworkOpti
 		return nil, err
 	}
 
-	cnfs, err := network.ipamAllocate()
+	err := network.ipamAllocate()
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if err != nil {
-			for _, cn := range cnfs {
-				cn()
-			}
+			network.ipamRelease()
 		}
 	}()
 
@@ -386,7 +386,7 @@ func (c *controller) addNetwork(n *network) error {
 	}
 
 	// Create the network
-	if err := d.CreateNetwork(n.id, n.generic, n.getIPv4Data(), n.getIPv6Data()); err != nil {
+	if err := d.CreateNetwork(n.id, n.generic, n.getIPData(4), n.getIPData(6)); err != nil {
 		return err
 	}
 
@@ -500,6 +500,18 @@ func (c *controller) NewSandbox(containerID string, options ...SandboxOption) (S
 	c.Lock()
 	c.sandboxes[sb.id] = sb
 	c.Unlock()
+	defer func() {
+		if err != nil {
+			c.Lock()
+			delete(c.sandboxes, sb.id)
+			c.Unlock()
+		}
+	}()
+
+	err = sb.storeUpdate()
+	if err != nil {
+		return nil, fmt.Errorf("updating the store state of sandbox failed: %v", err)
+	}
 
 	return sb, nil
 }

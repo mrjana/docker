@@ -221,7 +221,7 @@ func (ep *endpoint) Exists() bool {
 }
 
 func (ep *endpoint) Skip() bool {
-	return ep.getNetwork().Skip() || ep.DataScope() == datastore.LocalScope
+	return ep.getNetwork().Skip()
 }
 
 func (ep *endpoint) processOptions(options ...EndpointOption) {
@@ -622,21 +622,56 @@ func (ep *endpoint) assignAddress() error {
 		ipam ipamapi.Ipam
 		err  error
 	)
+
 	n := ep.getNetwork()
 	if n.Type() == "host" || n.Type() == "null" {
 		return nil
 	}
+
+	log.Debugf("Assigning addresses for endpoint %s's interface on network %s", ep.Name(), n.Name())
+
 	ipam, err = n.getController().getIpamDriver(n.ipamType)
 	if err != nil {
 		return err
 	}
-	for _, d := range n.getIPInfo() {
-		var addr *net.IPNet
-		addr, _, err = ipam.RequestAddress(d.PoolID, nil, nil)
+	err = ep.assignAddressVersion(4, ipam)
+	if err != nil {
+		return err
+	}
+	return ep.assignAddressVersion(6, ipam)
+}
+
+func (ep *endpoint) assignAddressVersion(ipVer int, ipam ipamapi.Ipam) error {
+	var (
+		poolID  *string
+		address **net.IPNet
+	)
+
+	n := ep.getNetwork()
+	switch ipVer {
+	case 4:
+		poolID = &ep.iface.v4PoolID
+		address = &ep.iface.addr
+	case 6:
+		poolID = &ep.iface.v6PoolID
+		address = &ep.iface.addrv6
+	default:
+		return types.InternalErrorf("incorrect ip version number passed: %d", ipVer)
+	}
+
+	ipInfo := n.getIPInfo(ipVer)
+
+	// ipv6 address is not mandatory
+	if len(ipInfo) == 0 && ipVer == 6 {
+		return nil
+	}
+
+	for _, d := range ipInfo {
+		addr, _, err := ipam.RequestAddress(d.PoolID, nil, nil)
 		if err == nil {
 			ep.Lock()
-			ep.iface.addr = addr
-			ep.iface.poolID = d.PoolID
+			*address = addr
+			*poolID = d.PoolID
 			ep.Unlock()
 			return nil
 		}
@@ -644,7 +679,7 @@ func (ep *endpoint) assignAddress() error {
 			return err
 		}
 	}
-	return fmt.Errorf("no available ip addresses on this network address pools: %s (%s)", n.Name(), n.ID())
+	return fmt.Errorf("no available IPv%d addresses on this network's address pools: %s (%s)", ipVer, n.Name(), n.ID())
 }
 
 func (ep *endpoint) releaseAddress() {
@@ -652,12 +687,20 @@ func (ep *endpoint) releaseAddress() {
 	if n.Type() == "host" || n.Type() == "null" {
 		return
 	}
+
+	log.Debugf("Releasing addresses for endpoint %s's interface on network %s", ep.Name(), n.Name())
+
 	ipam, err := n.getController().getIpamDriver(n.ipamType)
 	if err != nil {
 		log.Warnf("Failed to retrieve ipam driver to release interface address on delete of endpoint %s (%s): %v", ep.Name(), ep.ID(), err)
 		return
 	}
-	if err := ipam.ReleaseAddress(ep.iface.poolID, ep.iface.addr.IP); err != nil {
+	if err := ipam.ReleaseAddress(ep.iface.v4PoolID, ep.iface.addr.IP); err != nil {
 		log.Warnf("Failed to release ip address %s on delete of endpoint %s (%s): %v", ep.iface.addr.IP, ep.Name(), ep.ID(), err)
+	}
+	if ep.iface.addrv6 != nil && ep.iface.addrv6.IP.IsGlobalUnicast() {
+		if err := ipam.ReleaseAddress(ep.iface.v6PoolID, ep.iface.addrv6.IP); err != nil {
+			log.Warnf("Failed to release ip address %s on delete of endpoint %s (%s): %v", ep.iface.addrv6.IP, ep.Name(), ep.ID(), err)
+		}
 	}
 }

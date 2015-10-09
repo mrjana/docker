@@ -12,6 +12,7 @@ import (
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/etchosts"
+	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/types"
@@ -58,12 +59,20 @@ type svcMap map[string]net.IP
 
 // IpamConf contains all the ipam related configurations for a network
 type IpamConf struct {
+	// The master address pool for containers and network iterfaces
 	PreferredPool string
-	SubPool       string
-	Options       map[string]string // IPAM input options
-	IsV6          bool
-	Gateway       string
-	AuxAddresses  map[string]string
+	// A subset of the master pool. If specified,
+	// this becomes the container pool
+	SubPool string
+	// Input options for IPAM Driver (optional)
+	Options map[string]string
+	// IPv6 flag, Needed when no preferred pool is specified
+	IsV6 bool
+	// Preferred Network Gateway address (optional)
+	Gateway string
+	// Auxiliary addresses for network driver. Must be within the master pool.
+	// libnetwork will reserve them if they fall into the container pool
+	AuxAddresses map[string]string
 }
 
 // Validate checks whether the configuration is valid
@@ -272,6 +281,14 @@ func (n *network) CopyTo(o datastore.KVObject) error {
 		dstN.ipamV4Info = append(dstN.ipamV4Info, dstV4Info)
 	}
 
+	if n.ipamV6Info != nil {
+		for _, v6info := range n.ipamV6Info {
+			dstV6Info := &IpamInfo{}
+			v6info.CopyTo(dstV6Info)
+			dstN.ipamV6Info = append(dstN.ipamV6Info, dstV6Info)
+		}
+	}
+
 	dstN.generic = options.Generic{}
 	for k, v := range n.generic {
 		dstN.generic[k] = v
@@ -359,16 +376,24 @@ func (n *network) UnmarshalJSON(b []byte) (err error) {
 	}
 	n.name = netMap["name"].(string)
 	n.id = netMap["id"].(string)
-	n.ipamType = netMap["ipamType"].(string)
-	n.addrSpace = netMap["addrSpace"].(string)
 	n.networkType = netMap["networkType"].(string)
 	n.endpointCnt = uint64(netMap["endpointCnt"].(float64))
 	n.enableIPv6 = netMap["enableIPv6"].(bool)
+
 	if v, ok := netMap["generic"]; ok {
 		n.generic = v.(map[string]interface{})
 	}
 	if v, ok := netMap["persist"]; ok {
 		n.persist = v.(bool)
+	}
+	if v, ok := netMap["ipamType"]; ok {
+		n.ipamType = v.(string)
+	} else {
+		n.ipamType = ipamapi.DefaultIPAM
+	}
+
+	if v, ok := netMap["addrSpace"]; ok {
+		n.addrSpace = v.(string)
 	}
 	if v, ok := netMap["ipamV4Config"]; ok {
 		if err := json.Unmarshal([]byte(v.(string)), &n.ipamV4Config); err != nil {
@@ -532,17 +557,6 @@ func (n *network) deleteNetwork() error {
 		return fmt.Errorf("failed deleting network: %v", err)
 	}
 
-	// If it is bridge network type make sure we call the driver about the network
-	// because the network may have been created in some past life of libnetwork.
-	if n.Type() == "bridge" {
-		n.drvOnce.Do(func() {
-			err = n.getController().addNetwork(n)
-		})
-		if err != nil {
-			return err
-		}
-	}
-
 	if err := d.DeleteNetwork(n.ID()); err != nil {
 		// Forbidden Errors should be honored
 		if _, ok := err.(types.ForbiddenError); ok {
@@ -558,17 +572,6 @@ func (n *network) addEndpoint(ep *endpoint) error {
 	d, err := n.driver()
 	if err != nil {
 		return fmt.Errorf("failed to add endpoint: %v", err)
-	}
-
-	// If it is bridge network type make sure we call the driver about the network
-	// because the network may have been created in some past life of libnetwork.
-	if n.Type() == "bridge" {
-		n.drvOnce.Do(func() {
-			err = n.getController().addNetwork(n)
-		})
-		if err != nil {
-			return err
-		}
 	}
 
 	err = d.CreateEndpoint(n.id, ep.id, ep.Interface(), ep.generic)
@@ -777,44 +780,76 @@ func (n *network) getController() *controller {
 	return n.ctrlr
 }
 
-func (n *network) ipamAllocate() ([]func(), error) {
-	var (
-		cnl []func()
-		err error
-	)
-
-	// For now exclude host and null
+func (n *network) ipamAllocate() error {
+	// For now also exclude bridge from using new ipam
 	if n.Type() == "host" || n.Type() == "null" {
-		return cnl, nil
+		return nil
 	}
 
 	ipam, err := n.getController().getIpamDriver(n.ipamType)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if n.addrSpace == "" {
 		if n.addrSpace, err = n.deriveAddressSpace(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	if n.ipamV4Config == nil {
-		n.ipamV4Config = []*IpamConf{&IpamConf{}}
+	err = n.ipamAllocateVersion(4, ipam)
+	if err != nil {
+		return err
 	}
 
-	n.ipamV4Info = make([]*IpamInfo, len(n.ipamV4Config))
+	defer func() {
+		if err != nil {
+			n.ipamReleaseVersion(4, ipam)
+		}
+	}()
 
-	for i, cfg := range n.ipamV4Config {
+	return n.ipamAllocateVersion(6, ipam)
+}
+
+func (n *network) ipamAllocateVersion(ipVer int, ipam ipamapi.Ipam) error {
+	var (
+		cfgList  *[]*IpamConf
+		infoList *[]*IpamInfo
+		err      error
+	)
+
+	switch ipVer {
+	case 4:
+		cfgList = &n.ipamV4Config
+		infoList = &n.ipamV4Info
+	case 6:
+		cfgList = &n.ipamV6Config
+		infoList = &n.ipamV6Info
+	default:
+		return types.InternalErrorf("incorrect ip version passed to ipam allocate: %d", ipVer)
+	}
+
+	if *cfgList == nil {
+		if ipVer == 6 {
+			return nil
+		}
+		*cfgList = []*IpamConf{&IpamConf{}}
+	}
+
+	*infoList = make([]*IpamInfo, len(*cfgList))
+
+	log.Debugf("Allocating IPv%d pools for network %s (%s)", ipVer, n.Name(), n.ID())
+
+	for i, cfg := range *cfgList {
 		if err = cfg.Validate(); err != nil {
-			return nil, err
+			return err
 		}
 		d := &IpamInfo{}
-		n.ipamV4Info[i] = d
+		(*infoList)[i] = d
 
 		d.PoolID, d.Pool, d.Meta, err = ipam.RequestPool(n.addrSpace, cfg.PreferredPool, cfg.SubPool, cfg.Options, cfg.IsV6)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		defer func() {
@@ -827,7 +862,7 @@ func (n *network) ipamAllocate() ([]func(), error) {
 
 		if gws, ok := d.Meta[netlabel.Gateway]; ok {
 			if d.Gateway, err = types.ParseCIDR(gws); err != nil {
-				return nil, types.BadRequestErrorf("failed to parse gateway address (%v) returned by ipam driver: %v", gws, err)
+				return types.BadRequestErrorf("failed to parse gateway address (%v) returned by ipam driver: %v", gws, err)
 			}
 		}
 
@@ -836,30 +871,31 @@ func (n *network) ipamAllocate() ([]func(), error) {
 		// If none of the above is true, libnetwork will allocate one.
 		if cfg.Gateway != "" || d.Gateway == nil {
 			if d.Gateway, _, err = ipam.RequestAddress(d.PoolID, net.ParseIP(cfg.Gateway), nil); err != nil {
-				return nil, types.InternalErrorf("failed to allocate gateway (%v): %v", cfg.Gateway, err)
+				return types.InternalErrorf("failed to allocate gateway (%v): %v", cfg.Gateway, err)
 			}
 		}
 
-		cnl = append(cnl, func() {
-			if err := ipam.ReleaseAddress(d.PoolID, d.Gateway.IP); err != nil {
-				log.Warnf("Failed to release gw address %s after failure to create network %s (%s)", d.Gateway, n.Name(), n.ID())
-			}
-		})
+		// Auxiliary addresses must be part of the master address pool
+		// If they fall into the container addressable pool, libnetwork will reserve them
 		if cfg.AuxAddresses != nil {
 			var ip net.IP
 			d.IPAMData.AuxAddresses = make(map[string]*net.IPNet, len(cfg.AuxAddresses))
 			for k, v := range cfg.AuxAddresses {
 				if ip = net.ParseIP(v); ip == nil {
-					return nil, types.BadRequestErrorf("non parsable secondary ip address %s (%s) passed for network %s", k, v, n.Name())
+					return types.BadRequestErrorf("non parsable secondary ip address (%s:%s) passed for network %s", k, v, n.Name())
 				}
-				if d.IPAMData.AuxAddresses[k], _, err = ipam.RequestAddress(d.PoolID, ip, nil); err != nil {
-					return nil, types.InternalErrorf("failed to allocate secondary ip address %s(%s): %v", k, v, err)
+				if !d.Pool.Contains(ip) {
+					return types.ForbiddenErrorf("auxilairy address: (%s:%s) must belong to the master pool: %s", k, v, d.Pool)
+				}
+				// Attempt reservation in the container addressable pool, silent the error if address does not belong to that pool
+				if d.IPAMData.AuxAddresses[k], _, err = ipam.RequestAddress(d.PoolID, ip, nil); err != nil && err != ipamapi.ErrIPOutOfRange {
+					return types.InternalErrorf("failed to allocate secondary ip address (%s:%s): %v", k, v, err)
 				}
 			}
 		}
 	}
 
-	return cnl, nil
+	return nil
 }
 
 func (n *network) ipamRelease() {
@@ -872,7 +908,30 @@ func (n *network) ipamRelease() {
 		log.Warnf("Failed to retrieve ipam driver to release address pool(s) on delete of network %s (%s): %v", n.Name(), n.ID(), err)
 		return
 	}
-	for _, d := range n.ipamV4Info {
+	n.ipamReleaseVersion(4, ipam)
+	n.ipamReleaseVersion(6, ipam)
+}
+
+func (n *network) ipamReleaseVersion(ipVer int, ipam ipamapi.Ipam) {
+	var infoList []*IpamInfo
+
+	switch ipVer {
+	case 4:
+		infoList = n.ipamV4Info
+	case 6:
+		infoList = n.ipamV6Info
+	default:
+		log.Warnf("incorrect ip version passed to ipam release: %d", ipVer)
+		return
+	}
+
+	if infoList == nil {
+		return
+	}
+
+	log.Debugf("releasing IPv%d pools from network %s (%s)", ipVer, n.Name(), n.ID())
+
+	for _, d := range infoList {
 		if d.Gateway != nil {
 			if err := ipam.ReleaseAddress(d.PoolID, d.Gateway.IP); err != nil {
 				log.Warnf("Failed to release gateway ip address %s on delete of network %s (%s): %v", d.Gateway.IP, n.Name(), n.ID(), err)
@@ -880,8 +939,10 @@ func (n *network) ipamRelease() {
 		}
 		if d.IPAMData.AuxAddresses != nil {
 			for k, nw := range d.IPAMData.AuxAddresses {
-				if err := ipam.ReleaseAddress(d.PoolID, nw.IP); err != nil {
-					log.Warnf("Failed to release secondary ip address %s (%v) on delete of network %s (%s): %v", k, nw.IP, n.Name(), n.ID(), err)
+				if d.Pool.Contains(nw.IP) {
+					if err := ipam.ReleaseAddress(d.PoolID, nw.IP); err != nil && err != ipamapi.ErrIPOutOfRange {
+						log.Warnf("Failed to release secondary ip address %s (%v) on delete of network %s (%s): %v", k, nw.IP, n.Name(), n.ID(), err)
+					}
 				}
 			}
 		}
@@ -891,30 +952,38 @@ func (n *network) ipamRelease() {
 	}
 }
 
-func (n *network) getIPInfo() []*IpamInfo {
-	n.Lock()
-	defer n.Unlock()
-	l := make([]*IpamInfo, 0, len(n.ipamV4Info))
-	for _, d := range n.ipamV4Info {
-		l = append(l, d)
+func (n *network) getIPInfo(ipVer int) []*IpamInfo {
+	var info []*IpamInfo
+	switch ipVer {
+	case 4:
+		info = n.ipamV4Info
+	case 6:
+		info = n.ipamV6Info
+	default:
+		return nil
 	}
-	return l
-}
-
-func (n *network) getIPv4Data() []driverapi.IPAMData {
-	l := make([]driverapi.IPAMData, 0, len(n.ipamV4Info))
+	l := make([]*IpamInfo, 0, len(info))
 	n.Lock()
-	for _, d := range n.ipamV4Info {
-		l = append(l, d.IPAMData)
+	for _, d := range info {
+		l = append(l, d)
 	}
 	n.Unlock()
 	return l
 }
 
-func (n *network) getIPv6Data() []driverapi.IPAMData {
-	l := make([]driverapi.IPAMData, 0, len(n.ipamV6Info))
+func (n *network) getIPData(ipVer int) []driverapi.IPAMData {
+	var info []*IpamInfo
+	switch ipVer {
+	case 4:
+		info = n.ipamV4Info
+	case 6:
+		info = n.ipamV6Info
+	default:
+		return nil
+	}
+	l := make([]driverapi.IPAMData, 0, len(info))
 	n.Lock()
-	for _, d := range n.ipamV6Info {
+	for _, d := range info {
 		l = append(l, d.IPAMData)
 	}
 	n.Unlock()
