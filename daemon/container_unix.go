@@ -639,9 +639,11 @@ func (container *Container) buildEndpointInfo(ep libnetwork.Endpoint, networkSet
 		return networkSettings, nil
 	}
 
-	ones, _ := iface.Address().Mask.Size()
-	networkSettings.IPAddress = iface.Address().IP.String()
-	networkSettings.IPPrefixLen = ones
+	if iface.Address() != nil {
+		ones, _ := iface.Address().Mask.Size()
+		networkSettings.IPAddress = iface.Address().IP.String()
+		networkSettings.IPPrefixLen = ones
+	}
 
 	if iface.AddressIPv6() != nil && iface.AddressIPv6().IP.To16() != nil {
 		onesv6, _ := iface.AddressIPv6().Mask.Size()
