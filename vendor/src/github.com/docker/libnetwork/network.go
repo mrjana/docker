@@ -346,6 +346,7 @@ func (n *network) EndpointCnt() uint64 {
 }
 
 func (n *network) atomicIncDecEpCnt(inc bool) error {
+	i := 0
 retry:
 	n.Lock()
 	if inc {
@@ -365,7 +366,8 @@ retry:
 			if err := store.GetObject(datastore.Key(n.Key()...), n); err != nil {
 				return fmt.Errorf("could not update the kvobject to latest when trying to atomic add endpoint count: %v", err)
 			}
-
+			i++
+                        log.Printf("retrying atomicIncDecEpCnt inc %t retrycnt %d", inc, i)
 			goto retry
 		}
 
