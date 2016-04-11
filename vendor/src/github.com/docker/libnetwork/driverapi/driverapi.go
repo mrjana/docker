@@ -13,10 +13,20 @@ const NetworkPluginEndpointType = "NetworkDriver"
 type Driver interface {
 	discoverapi.Discover
 
+	// NetworkAllocate invokes the driver method to allocate network
+	// specific resources passing network id and network specific config.
+	// It returns a key,value pair of network specific driver allocations
+	// to the caller.
+	NetworkAllocate(nid string, options map[string]string, ipV4Data, ipV6Data []IPAMData) (map[string]string, error)
+
+	// NetworkFree invokes the driver method to free network specific resources
+	// passing network id.
+	NetworkFree(nid string) error
+
 	// CreateNetwork invokes the driver method to create a network passing
 	// the network id and network specific config. The config mechanism will
 	// eventually be replaced with labels which are yet to be introduced.
-	CreateNetwork(nid string, options map[string]interface{}, ipV4Data, ipV6Data []IPAMData) error
+	CreateNetwork(nid string, options map[string]interface{}, ipV4Data, ipV6Data []IPAMData) ([]string, error)
 
 	// DeleteNetwork invokes the driver method to delete network passing
 	// the network id.
@@ -41,6 +51,8 @@ type Driver interface {
 
 	// Leave method is invoked when a Sandbox detaches from an endpoint.
 	Leave(nid, eid string) error
+
+	EventNotify(event EventType, nid string, tableName string, key string, value []byte)
 
 	// Type returns the the type of this driver, the network type this driver manages
 	Type() string
@@ -94,6 +106,8 @@ type JoinInfo interface {
 
 	// DisableGatewayService tells libnetwork not to provide Default GW for the container
 	DisableGatewayService()
+
+	AddTableEntry(tableName string, key string, value []byte) error
 }
 
 // DriverCallback provides a Callback interface for Drivers into LibNetwork
@@ -116,3 +130,11 @@ type IPAMData struct {
 	Gateway      *net.IPNet
 	AuxAddresses map[string]*net.IPNet
 }
+
+type EventType uint8
+
+const (
+	Create EventType = 1 + iota
+	Update
+	Delete
+)

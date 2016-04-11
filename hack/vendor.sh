@@ -24,16 +24,17 @@ clone git golang.org/x/net 47990a1ba55743e6ef1affd3a14e5bac8553615d https://gith
 clone git golang.org/x/sys eb2c74142fd19a79b3f237334c7384d5167b1b46 https://github.com/golang/sys.git
 clone git github.com/docker/go-units 651fc226e7441360384da338d0fd37f2440ffbe3
 clone git github.com/docker/go-connections v0.2.0
-clone git github.com/docker/engine-api afb1638f70a4b839be80ea37a5073faa18a30194
+clone git github.com/docker/engine-api c2165a7e6dbb8b66c8e975f11a63764f4e0a7824 https://github.com/mrjana/engine-api
 clone git github.com/RackSec/srslog 6eb773f331e46fbba8eecb8e794e635e75fc04de
 clone git github.com/imdario/mergo 0.2.1
 
 #get libnetwork packages
-clone git github.com/docker/libnetwork v0.7.0-dev.3
+clone git github.com/docker/libnetwork dfe312274ec8b375d2204a0d5c45bf99946a3444 https://github.com/mrjana/libnetwork
 clone git github.com/armon/go-metrics eb0af217e5e9747e41dd5303755356b62d28e3ec
 clone git github.com/hashicorp/go-msgpack 71c2886f5a673a35f909803f38ece5810165097b
-clone git github.com/hashicorp/memberlist 9a1e242e454d2443df330bdd51a436d5a9058fc4
-clone git github.com/hashicorp/serf 7151adcef72687bf95f451a2e0ba15cb19412bf2
+clone git github.com/hashicorp/memberlist 88ac4de0d1a0ca6def284b571342db3b777a4c37
+clone git github.com/hashicorp/serf 598c54895cc5a7b1a24a398d635e8c0ea0959870
+clone git github.com/hashicorp/go-multierror 2167c8ec40776024589f483a6b836489e47e1049
 clone git github.com/docker/libkv c2aac5dbbaa5c872211edea7c0f32b3bd67e7410
 clone git github.com/vishvananda/netns 604eaf189ee867d8c147fafc28def2394e878d25
 clone git github.com/vishvananda/netlink bfd70f556483c008636b920dda142fdaa0d59ef9
@@ -46,6 +47,8 @@ clone git github.com/ugorji/go 5abd4e96a45c386928ed2ca2a7ef63e2533e18ec
 clone git github.com/hashicorp/consul v0.5.2
 clone git github.com/boltdb/bolt v1.1.0
 clone git github.com/miekg/dns 75e6e86cc601825c5dbcd4e0c209eab180997cd7
+clone git github.com/armon/go-radix e39d623f12e8e41c7b5529e9a9dd67a1e2261f80
+clone git github.com/docker/go-events 2e7d352816128aa84f4d29b2a21d400133701a0d
 
 # get graph and distribution packages
 clone git github.com/docker/distribution 7b66c50bb7e0e4b3b83f8fd134a9f6ea4be08b57

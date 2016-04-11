@@ -1,6 +1,7 @@
 package host
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/docker/libnetwork/datastore"
@@ -17,24 +18,35 @@ type driver struct {
 }
 
 // Init registers a new instance of host driver
-func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
+func Init(dc driverapi.DriverCallback, isAgent bool, config map[string]interface{}) error {
 	c := driverapi.Capability{
 		DataScope: datastore.LocalScope,
 	}
 	return dc.RegisterDriver(networkType, &driver{}, c)
 }
 
-func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Data, ipV6Data []driverapi.IPAMData) error {
+func (d *driver) NetworkAllocate(id string, option map[string]string, ipV4Data, ipV6Data []driverapi.IPAMData) (map[string]string, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (d *driver) NetworkFree(id string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (d *driver) EventNotify(etype driverapi.EventType, nid, tableName, key string, value []byte) {
+}
+
+func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Data, ipV6Data []driverapi.IPAMData) ([]string, error) {
 	d.Lock()
 	defer d.Unlock()
 
 	if d.network != "" {
-		return types.ForbiddenErrorf("only one instance of \"%s\" network is allowed", networkType)
+		return nil, types.ForbiddenErrorf("only one instance of \"%s\" network is allowed", networkType)
 	}
 
 	d.network = id
 
-	return nil
+	return nil, nil
 }
 
 func (d *driver) DeleteNetwork(nid string) error {

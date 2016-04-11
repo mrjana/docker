@@ -565,49 +565,47 @@ func (n *network) processOptions(options ...NetworkOption) {
 	}
 }
 
-func (n *network) driverScope() string {
+func (n *network) resolveDriver(name string) (driverapi.Driver, *driverapi.Capability, error) {
 	c := n.getController()
 
-	c.Lock()
 	// Check if a driver for the specified network type is available
-	dd, ok := c.drivers[n.networkType]
-	c.Unlock()
-
-	if !ok {
+	d, cap := c.drvRegistry.Driver(name)
+	if d == nil {
 		var err error
-		dd, err = c.loadDriver(n.networkType)
+		err = c.loadDriver(name)
 		if err != nil {
-			// If driver could not be resolved simply return an empty string
-			return ""
+			return nil, nil, err
+		}
+
+		d, cap = c.drvRegistry.Driver(name)
+		if d == nil {
+			return nil, nil, fmt.Errorf("could not resolve driver %s in registry", name)
 		}
 	}
 
-	return dd.capability.DataScope
+	return d, cap, nil
+}
+
+func (n *network) driverScope() string {
+	_, cap, err := n.resolveDriver(n.networkType)
+	if err != nil {
+		// If driver could not be resolved simply return an empty string
+		return ""
+	}
+
+	return cap.DataScope
 }
 
 func (n *network) driver(load bool) (driverapi.Driver, error) {
-	c := n.getController()
-
-	c.Lock()
-	// Check if a driver for the specified network type is available
-	dd, ok := c.drivers[n.networkType]
-	c.Unlock()
-
-	if !ok && load {
-		var err error
-		dd, err = c.loadDriver(n.networkType)
-		if err != nil {
-			return nil, err
-		}
-	} else if !ok {
-		// dont fail if driver loading is not required
-		return nil, nil
+	d, cap, err := n.resolveDriver(n.networkType)
+	if err != nil {
+		return nil, err
 	}
 
 	n.Lock()
-	n.scope = dd.capability.DataScope
+	n.scope = cap.DataScope
 	n.Unlock()
-	return dd.driver, nil
+	return d, nil
 }
 
 func (n *network) Delete() error {
@@ -632,7 +630,7 @@ func (n *network) Delete() error {
 	}
 	defer func() {
 		if err != nil {
-			if e := c.addNetwork(n); e != nil {
+			if _, e := c.addNetwork(n); e != nil {
 				log.Warnf("failed to rollback deleteNetwork for network %s: %v",
 					n.Name(), err)
 			}
@@ -650,6 +648,12 @@ func (n *network) Delete() error {
 
 	if err = n.getController().deleteFromStore(n); err != nil {
 		return fmt.Errorf("error deleting network from store: %v", err)
+	}
+
+	n.cancelDriverWatches()
+
+	if e := n.leaveCluster(); e != nil {
+		log.Errorf("Failed leaving network %s from the agent cluster: %v", n.Name(), e)
 	}
 
 	return nil
@@ -721,12 +725,12 @@ func (n *network) CreateEndpoint(name string, options ...EndpointOption) (Endpoi
 		}
 	}
 
-	ipam, err := n.getController().getIPAM(n.ipamType)
+	ipam, cap, err := n.getController().getIPAMDriver(n.ipamType)
 	if err != nil {
 		return nil, err
 	}
 
-	if ipam.capability.RequiresMACAddress {
+	if cap.RequiresMACAddress {
 		if ep.iface.mac == nil {
 			ep.iface.mac = netutils.GenerateRandomMAC()
 		}
@@ -736,7 +740,7 @@ func (n *network) CreateEndpoint(name string, options ...EndpointOption) (Endpoi
 		ep.ipamOptions[netlabel.MacAddress] = ep.iface.mac.String()
 	}
 
-	if err = ep.assignAddress(ipam.driver, true, !n.postIPv6); err != nil {
+	if err = ep.assignAddress(ipam, true, !n.postIPv6); err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -756,7 +760,7 @@ func (n *network) CreateEndpoint(name string, options ...EndpointOption) (Endpoi
 		}
 	}()
 
-	if err = ep.assignAddress(ipam.driver, false, n.postIPv6); err != nil {
+	if err = ep.assignAddress(ipam, false, n.postIPv6); err != nil {
 		return nil, err
 	}
 
@@ -872,13 +876,13 @@ func (n *network) addSvcRecords(name string, epIP net.IP, ipMapUpdate bool) {
 	c := n.getController()
 	c.Lock()
 	defer c.Unlock()
-	sr, ok := c.svcDb[n.ID()]
+	sr, ok := c.svcRecords[n.ID()]
 	if !ok {
 		sr = svcInfo{
 			svcMap: make(map[string][]net.IP),
 			ipMap:  make(map[string]string),
 		}
-		c.svcDb[n.ID()] = sr
+		c.svcRecords[n.ID()] = sr
 	}
 
 	if ipMapUpdate {
@@ -901,7 +905,7 @@ func (n *network) deleteSvcRecords(name string, epIP net.IP, ipMapUpdate bool) {
 	c := n.getController()
 	c.Lock()
 	defer c.Unlock()
-	sr, ok := c.svcDb[n.ID()]
+	sr, ok := c.svcRecords[n.ID()]
 	if !ok {
 		return
 	}
@@ -929,7 +933,7 @@ func (n *network) getSvcRecords(ep *endpoint) []etchosts.Record {
 	defer n.Unlock()
 
 	var recs []etchosts.Record
-	sr, _ := n.ctrlr.svcDb[n.id]
+	sr, _ := n.ctrlr.svcRecords[n.id]
 
 	for h, ip := range sr.svcMap {
 		if ep != nil && strings.Split(h, ".")[0] == ep.Name() {
@@ -957,7 +961,7 @@ func (n *network) ipamAllocate() error {
 		return nil
 	}
 
-	ipam, err := n.getController().getIpamDriver(n.ipamType)
+	ipam, _, err := n.getController().getIPAMDriver(n.ipamType)
 	if err != nil {
 		return err
 	}
@@ -1077,7 +1081,7 @@ func (n *network) ipamRelease() {
 	if n.Type() == "host" || n.Type() == "null" {
 		return
 	}
-	ipam, err := n.getController().getIpamDriver(n.ipamType)
+	ipam, _, err := n.getController().getIPAMDriver(n.ipamType)
 	if err != nil {
 		log.Warnf("Failed to retrieve ipam driver to release address pool(s) on delete of network %s (%s): %v", n.Name(), n.ID(), err)
 		return
@@ -1165,17 +1169,14 @@ func (n *network) getIPData(ipVer int) []driverapi.IPAMData {
 }
 
 func (n *network) deriveAddressSpace() (string, error) {
-	c := n.getController()
-	c.Lock()
-	ipd, ok := c.ipamDrivers[n.ipamType]
-	c.Unlock()
-	if !ok {
-		return "", types.NotFoundErrorf("could not find ipam driver %s to get default address space", n.ipamType)
+	local, global, err := n.getController().drvRegistry.IPAMDefaultAddressSpaces(n.ipamType)
+	if err != nil {
+		return "", types.NotFoundErrorf("failed to get default address space: %v", err)
 	}
 	if n.DataScope() == datastore.GlobalScope {
-		return ipd.defaultGlobalAddressSpace, nil
+		return global, nil
 	}
-	return ipd.defaultLocalAddressSpace, nil
+	return local, nil
 }
 
 func (n *network) Info() NetworkInfo {
@@ -1255,4 +1256,81 @@ func (n *network) IPv6Enabled() bool {
 	defer n.Unlock()
 
 	return n.enableIPv6
+}
+
+type service struct {
+	name     string
+	id       string
+	backEnds map[string]map[string]net.IP
+}
+
+func newService(name string, id string) *service {
+	return &service{
+		name:     name,
+		id:       id,
+		backEnds: make(map[string]map[string]net.IP),
+	}
+}
+
+func (c *controller) addServiceBinding(name, sid, nid, eid string, ip net.IP) error {
+	var s *service
+
+	n, err := c.NetworkByID(nid)
+	if err != nil {
+		return err
+	}
+
+	c.Lock()
+	s, ok := c.serviceBindings[sid]
+	if !ok {
+		s = newService(name, sid)
+	}
+
+	netBackEnds, ok := s.backEnds[nid]
+	if !ok {
+		netBackEnds = make(map[string]net.IP)
+		s.backEnds[nid] = netBackEnds
+	}
+
+	netBackEnds[eid] = ip
+	c.serviceBindings[sid] = s
+	c.Unlock()
+
+	n.(*network).addSvcRecords(name, ip, false)
+	return nil
+}
+
+func (c *controller) rmServiceBinding(name, sid, nid, eid string, ip net.IP) error {
+	n, err := c.NetworkByID(nid)
+	if err != nil {
+		return err
+	}
+
+	c.Lock()
+	s, ok := c.serviceBindings[sid]
+	if !ok {
+		c.Unlock()
+		return nil
+	}
+
+	netBackEnds, ok := s.backEnds[nid]
+	if !ok {
+		c.Unlock()
+		return nil
+	}
+
+	delete(netBackEnds, eid)
+
+	if len(netBackEnds) == 0 {
+		delete(s.backEnds, nid)
+	}
+
+	if len(s.backEnds) == 0 {
+		delete(c.serviceBindings, sid)
+	}
+	c.Unlock()
+
+	n.(*network).deleteSvcRecords(name, ip, false)
+
+	return err
 }

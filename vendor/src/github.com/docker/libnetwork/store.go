@@ -4,10 +4,23 @@ import (
 	"fmt"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/docker/libkv/store/boltdb"
+	"github.com/docker/libkv/store/consul"
+	"github.com/docker/libkv/store/etcd"
+	"github.com/docker/libkv/store/zookeeper"
 	"github.com/docker/libnetwork/datastore"
 )
 
+func registerKVStores() {
+	consul.Register()
+	zookeeper.Register()
+	etcd.Register()
+	boltdb.Register()
+}
+
 func (c *controller) initStores() error {
+	registerKVStores()
+
 	c.Lock()
 	if c.cfg == nil {
 		c.Unlock()
@@ -399,7 +412,7 @@ func (c *controller) processEndpointDelete(nmap map[string]*netWatch, ep *endpoi
 
 			// This is the last container going away for the network. Destroy
 			// this network's svc db entry
-			delete(c.svcDb, ep.getNetwork().ID())
+			delete(c.svcRecords, ep.getNetwork().ID())
 
 			delete(nmap, ep.getNetwork().ID())
 		}

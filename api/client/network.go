@@ -32,6 +32,7 @@ func (cli *DockerCli) CmdNetwork(args ...string) error {
 // Usage: docker network create [OPTIONS] <NETWORK-NAME>
 func (cli *DockerCli) CmdNetworkCreate(args ...string) error {
 	cmd := Cli.Subcmd("network create", []string{"NETWORK-NAME"}, "Creates a new network with a name specified by the user", false)
+	flID := cmd.String([]string{"-id"}, "", "Network ID")
 	flDriver := cmd.String([]string{"d", "-driver"}, "bridge", "Driver to manage the Network")
 	flOpts := opts.NewMapOpts(nil, nil)
 
@@ -72,6 +73,7 @@ func (cli *DockerCli) CmdNetworkCreate(args ...string) error {
 	// Construct network create request body
 	nc := types.NetworkCreate{
 		Name:           cmd.Arg(0),
+		ID:             *flID,
 		Driver:         driver,
 		IPAM:           network.IPAM{Driver: *flIpamDriver, Config: ipamCfg, Options: flIpamOpt.GetAll()},
 		Options:        flOpts.GetAll(),

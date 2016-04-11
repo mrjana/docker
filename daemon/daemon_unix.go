@@ -31,8 +31,8 @@ import (
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
 	"github.com/docker/libnetwork/drivers/bridge"
-	"github.com/docker/libnetwork/ipamutils"
 	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/types"
 	blkiodev "github.com/opencontainers/runc/libcontainer/configs"
@@ -511,6 +511,8 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 
 	options = append(options, nwconfig.OptionDataDir(dconfig.Root))
 
+	options = append(options, nwconfig.OptionAgent())
+
 	dd := runconfig.DefaultDaemonNetworkMode()
 	dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
 	options = append(options, nwconfig.OptionDefaultDriver(string(dd)))
@@ -536,6 +538,25 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 		options = append(options, nwconfig.OptionDiscoveryAddress(dconfig.ClusterAdvertise))
 	}
 
+	for _, label := range dconfig.Labels {
+		if !strings.Contains(label, "com.docker.bind") &&
+			!strings.Contains(label, "com.docker.neighbor") {
+			continue
+		}
+		pair := strings.Split(label, "=")
+		if len(pair) < 2 {
+			logrus.Errorf("Invalid cluster label = %s", label)
+			continue
+		}
+
+		switch pair[0] {
+		case "com.docker.bind":
+			options = append(options, nwconfig.OptionBind(pair[1]))
+		case "com.docker.neighbor":
+			options = append(options, nwconfig.OptionNeighbors([]string{pair[1]}))
+		}
+	}
+
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))
 	options = append(options, driverOptions(dconfig)...)
 	return options, nil
@@ -553,12 +574,12 @@ func (daemon *Daemon) initNetworkController(config *Config) (libnetwork.NetworkC
 	}
 
 	// Initialize default network on "null"
-	if _, err := controller.NewNetwork("null", "none", libnetwork.NetworkOptionPersist(false)); err != nil {
+	if _, err := controller.NewNetwork("null", "none", "", libnetwork.NetworkOptionPersist(false)); err != nil {
 		return nil, fmt.Errorf("Error creating default \"null\" network: %v", err)
 	}
 
 	// Initialize default network on "host"
-	if _, err := controller.NewNetwork("host", "host", libnetwork.NetworkOptionPersist(false)); err != nil {
+	if _, err := controller.NewNetwork("host", "host", "", libnetwork.NetworkOptionPersist(false)); err != nil {
 		return nil, fmt.Errorf("Error creating default \"host\" network: %v", err)
 	}
 
@@ -615,7 +636,7 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 
 	ipamV4Conf = &libnetwork.IpamConf{AuxAddresses: make(map[string]string)}
 
-	nw, nw6List, err := ipamutils.ElectInterfaceAddresses(bridgeName)
+	nw, nw6List, err := netutils.ElectInterfaceAddresses(bridgeName)
 	if err == nil {
 		ipamV4Conf.PreferredPool = types.GetIPNetCanonical(nw).String()
 		hip, _ := types.GetHostPartIP(nw.IP, nw.Mask)
@@ -693,7 +714,7 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 		v6Conf = append(v6Conf, ipamV6Conf)
 	}
 	// Initialize default network on "bridge" with the same name
-	_, err = controller.NewNetwork("bridge", "bridge",
+	_, err = controller.NewNetwork("bridge", "bridge", "",
 		libnetwork.NetworkOptionGeneric(options.Generic{
 			netlabel.GenericData: netOption,
 			netlabel.EnableIPv6:  config.bridgeConfig.EnableIPv6,

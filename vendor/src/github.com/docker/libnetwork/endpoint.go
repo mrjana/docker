@@ -67,6 +67,8 @@ type endpoint struct {
 	ipamOptions       map[string]string
 	aliases           map[string]string
 	myAliases         []string
+	svcID             string
+	svcName           string
 	dbIndex           uint64
 	dbExists          bool
 	sync.Mutex
@@ -89,6 +91,9 @@ func (ep *endpoint) MarshalJSON() ([]byte, error) {
 	epMap["anonymous"] = ep.anonymous
 	epMap["disableResolution"] = ep.disableResolution
 	epMap["myAliases"] = ep.myAliases
+	epMap["svcName"] = ep.svcName
+	epMap["svcID"] = ep.svcID
+
 	return json.Marshal(epMap)
 }
 
@@ -172,6 +177,15 @@ func (ep *endpoint) UnmarshalJSON(b []byte) (err error) {
 	if l, ok := epMap["locator"]; ok {
 		ep.locator = l.(string)
 	}
+
+	if sn, ok := epMap["svcName"]; ok {
+		ep.svcName = sn.(string)
+	}
+
+	if si, ok := epMap["svcID"]; ok {
+		ep.svcID = si.(string)
+	}
+
 	ma, _ := json.Marshal(epMap["myAliases"])
 	var myAliases []string
 	json.Unmarshal(ma, &myAliases)
@@ -196,6 +210,8 @@ func (ep *endpoint) CopyTo(o datastore.KVObject) error {
 	dstEp.dbExists = ep.dbExists
 	dstEp.anonymous = ep.anonymous
 	dstEp.disableResolution = ep.disableResolution
+	dstEp.svcName = ep.svcName
+	dstEp.svcID = ep.svcID
 
 	if ep.iface != nil {
 		dstEp.iface = &endpointInterface{}
@@ -425,7 +441,9 @@ func (ep *endpoint) sbJoin(sbox Sandbox, options ...EndpointOption) error {
 	}()
 
 	// Watch for service records
-	network.getController().watchSvcRecord(ep)
+	if !network.getController().cfg.Daemon.IsAgent {
+		network.getController().watchSvcRecord(ep)
+	}
 
 	address := ""
 	if ip := ep.getFirstInterfaceAddress(); ip != nil {
@@ -462,9 +480,14 @@ func (ep *endpoint) sbJoin(sbox Sandbox, options ...EndpointOption) error {
 		return err
 	}
 
+	if err := ep.addToCluster(); err != nil {
+		log.Errorf("Could not update state for endpoint %s into cluster: %v", ep.Name(), err)
+	}
+
 	if sb.needDefaultGW() {
 		return sb.setupDefaultGW(ep)
 	}
+
 	return nil
 }
 
@@ -596,6 +619,10 @@ func (ep *endpoint) sbLeave(sbox Sandbox, force bool, options ...EndpointOption)
 		return err
 	}
 
+	if err := ep.deleteFromCluster(); err != nil {
+		log.Errorf("Could not delete state for endpoint %s from cluster: %v", ep.Name(), err)
+	}
+
 	sb.deleteHostsEntries(n.getSvcRecords(ep))
 	return nil
 }
@@ -673,7 +700,9 @@ func (ep *endpoint) Delete(force bool) error {
 	}()
 
 	// unwatch for service records
-	n.getController().unWatchSvcRecord(ep)
+	if !n.getController().cfg.Daemon.IsAgent {
+		n.getController().unWatchSvcRecord(ep)
+	}
 
 	if err = ep.deleteEndpoint(force); err != nil && !force {
 		return err
@@ -806,6 +835,14 @@ func CreateOptionAlias(name string, alias string) EndpointOption {
 	}
 }
 
+// CreateOptionService function returns an option setter for setting service binding configuration
+func CreateOptionService(name, id string) EndpointOption {
+	return func(ep *endpoint) {
+		ep.svcName = name
+		ep.svcID = id
+	}
+}
+
 //CreateOptionMyAlias function returns an option setter for setting endpoint's self alias
 func CreateOptionMyAlias(alias string) EndpointOption {
 	return func(ep *endpoint) {
@@ -924,7 +961,7 @@ func (ep *endpoint) releaseAddress() {
 
 	log.Debugf("Releasing addresses for endpoint %s's interface on network %s", ep.Name(), n.Name())
 
-	ipam, err := n.getController().getIpamDriver(n.ipamType)
+	ipam, _, err := n.getController().getIPAMDriver(n.ipamType)
 	if err != nil {
 		log.Warnf("Failed to retrieve ipam driver to release interface address on delete of endpoint %s (%s): %v", ep.Name(), ep.ID(), err)
 		return
