@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -783,6 +784,11 @@ func (container *Container) BuildCreateEndpointOptions(n libnetwork.Network, epC
 
 		for _, alias := range epConfig.Aliases {
 			createOptions = append(createOptions, libnetwork.CreateOptionMyAlias(alias))
+		}
+
+		if epConfig.ServiceConfig != nil {
+			log.Printf("===> Creating service config %s %s", epConfig.ServiceConfig.Name, epConfig.ServiceConfig.ID)
+			createOptions = append(createOptions, libnetwork.CreateOptionService(epConfig.ServiceConfig.Name, epConfig.ServiceConfig.ID))
 		}
 	}
 

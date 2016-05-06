@@ -1600,6 +1600,8 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 
 	options = append(options, nwconfig.OptionDataDir(dconfig.Root))
 
+	options = append(options, nwconfig.OptionAgent())
+
 	dd := runconfig.DefaultDaemonNetworkMode()
 	dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
 	options = append(options, nwconfig.OptionDefaultDriver(string(dd)))
@@ -1623,6 +1625,25 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 
 	if dconfig.ClusterAdvertise != "" {
 		options = append(options, nwconfig.OptionDiscoveryAddress(dconfig.ClusterAdvertise))
+	}
+
+	for _, label := range dconfig.Labels {
+		if !strings.Contains(label, "com.docker.bind") &&
+			!strings.Contains(label, "com.docker.neighbor") {
+			continue
+		}
+		pair := strings.Split(label, "=")
+		if len(pair) < 2 {
+			logrus.Errorf("Invalid cluster label = %s", label)
+			continue
+		}
+
+		switch pair[0] {
+		case "com.docker.bind":
+			options = append(options, nwconfig.OptionBind(pair[1]))
+		case "com.docker.neighbor":
+			options = append(options, nwconfig.OptionNeighbors([]string{pair[1]}))
+		}
 	}
 
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))

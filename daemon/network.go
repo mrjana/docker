@@ -134,7 +134,8 @@ func (daemon *Daemon) CreateNetwork(create types.NetworkCreateRequest) (*types.N
 	if create.Internal {
 		nwOptions = append(nwOptions, libnetwork.NetworkOptionInternalNetwork())
 	}
-	n, err := c.NewNetwork(driver, create.Name, nwOptions...)
+
+	n, err := c.NewNetwork(driver, create.Name, create.ID, nwOptions...)
 	if err != nil {
 		return nil, err
 	}
