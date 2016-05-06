@@ -439,6 +439,7 @@ type EndpointResource struct {
 
 // NetworkCreate is the expected body of the "create network" http request message
 type NetworkCreate struct {
+	ID             string `json:"Id"`
 	CheckDuplicate bool
 	Driver         string
 	EnableIPv6     bool
